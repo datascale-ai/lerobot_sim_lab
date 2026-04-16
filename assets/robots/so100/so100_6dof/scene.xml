@@ -1,0 +1,324 @@
+<mujoco model="so_arm100_scene">
+  <compiler angle="radian" meshdir="so100_meshes/"/>
+
+  <option cone="elliptic" impratio="10" timestep="0.002" gravity="0 0 -9.81" density="1.2" viscosity="0.2"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="140" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    
+    <material name="floor_mat" rgba="0.1 0.15 0.25 1" specular="0.1" shininess="0.2"/>
+    
+    <material name="black_plastic" rgba="0.15 0.15 0.15 1" specular="0.3" shininess="0.2"/>
+    <material name="fabric_dark" rgba="0.1 0.1 0.1 1" specular="0.1" shininess="0"/>
+    <material name="paper_white" rgba="0.95 0.95 0.95 1" specular="0" shininess="0"/>
+    
+    <material name="cardboard_white" rgba="0.9 0.9 0.9 1" specular="0.1" shininess="0"/>
+    
+    <texture name="box_front_tex" type="2d" file="so100_meshes/box_front.png" width="1" height="1"/>
+    <texture name="box_side_tex" type="2d" file="so100_meshes/box_side.png" width="1" height="1"/>
+    <texture name="box_inside_tex" type="2d" file="so100_meshes/box_inside.png"/>
+    
+    <material name="box_front_mat" texture="box_front_tex" texrepeat="1 1" texuniform="false" rgba="1 1 1 1"/>
+    <material name="box_side_mat" texture="box_side_tex" texrepeat="1 1" texuniform="false" rgba="1 1 1 1"/>
+    <material name="box_inside_mat" texture="box_inside_tex" rgba="1 1 1 1"/>
+
+    <texture name="pen1_tex" type="2d" file="so100_meshes/pen1.png"/>
+    <texture name="pen2_tex" type="2d" file="so100_meshes/pen2.png"/>
+    <texture name="pen3_tex" type="2d" file="so100_meshes/pen3.png"/>
+    <texture name="pen4_tex" type="2d" file="so100_meshes/pen4.png"/>
+    
+    <material name="pen1_mat" texture="pen1_tex" texuniform="true" specular="0.5" shininess="0.5" rgba="1 1 1 1"/>
+    <material name="pen2_mat" texture="pen2_tex" texuniform="true" specular="0.5" shininess="0.5" rgba="1 1 1 1"/>
+    <material name="pen3_mat" texture="pen3_tex" texuniform="true" specular="0.5" shininess="0.5" rgba="1 1 1 1"/>
+    <material name="pen4_mat" texture="pen4_tex" texuniform="true" specular="0.5" shininess="0.5" rgba="1 1 1 1"/>
+    <mesh name="pen_mesh" file="Jcjensonpen.obj" scale="0.009 0.009 0.009"/>
+    <mesh name="pen1_mesh" file="Sketchfabpen.obj" scale="0.03 0.03 0.03"/>
+
+    <texture name="table_wood_tex" type="2d" file="so100_meshes/wood_texture.png" width="512" height="512"/>
+    <material name="wood_table" texture="table_wood_tex" texrepeat="2 2" texuniform="true" specular="0.1" shininess="0.1"/>
+
+    <material name="blue" rgba="0.2 0.6 0.8 1.0" specular="0.1" shininess="0.1"/>
+    <material name="black" rgba="0.1 0.1 0.1 1.0" specular="0.1" shininess="0.1"/>
+
+    <mesh name="Base" file="Base.stl"/>
+    <mesh name="Base_Motor" file="Base_Motor.stl"/>
+    <mesh name="Rotation_Pitch" file="Rotation_Pitch.stl"/>
+    <mesh name="Rotation_Pitch_Motor" file="Rotation_Pitch_Motor.stl"/>
+    <mesh name="Upper_Arm" file="Upper_Arm.stl"/>
+    <mesh name="Upper_Arm_Motor" file="Upper_Arm_Motor.stl"/>
+    <mesh name="Lower_Arm" file="Lower_Arm.stl"/>
+    <mesh name="Lower_Arm_Motor" file="Lower_Arm_Motor.stl"/>
+    <mesh name="Wrist_Pitch_Roll" file="Wrist_Pitch_Roll.stl"/>
+    <mesh name="Wrist_Pitch_Roll_Motor" file="Wrist_Pitch_Roll_Motor.stl"/>
+    <mesh name="Fixed_Jaw" file="Fixed_Jaw.stl"/>
+    <mesh name="Fixed_Jaw_Motor" file="Fixed_Jaw_Motor.stl"/>
+    <mesh name="Fixed_Jaw_Collision_1" file="Fixed_Jaw_Collision_1.stl"/>
+    <mesh name="Fixed_Jaw_Collision_2" file="Fixed_Jaw_Collision_2.stl"/>
+    <mesh name="Moving_Jaw" file="Moving_Jaw.stl"/>
+    <mesh name="Moving_Jaw_Collision_1" file="Moving_Jaw_Collision_1.stl"/>
+    <mesh name="Moving_Jaw_Collision_2" file="Moving_Jaw_Collision_2.stl"/>
+    <mesh name="Moving_Jaw_Collision_3" file="Moving_Jaw_Collision_3.stl"/>
+  </asset>
+
+  <default>
+    <default class="so_arm100">
+      <joint frictionloss="0.1" armature="0.1"/>
+      <position kp="50" dampratio="1" forcerange="-35 35" ctrlrange="-3.14158 3.14158"/>
+      <default class="Rotation"> <joint axis="0 1 0" range="-2.2 2.2"/> </default>
+      <default class="Pitch"> <joint axis="1 0 0" range="-3.14158 0.2"/> </default>
+      <default class="Elbow"> <joint axis="1 0 0" range="0 3.14158"/> </default>
+      <default class="Wrist_Pitch"> <joint axis="1 0 0" range="-2.0 1.8"/> </default>
+      <default class="Wrist_Roll"> <joint axis="0 1 0" range="-3.14158 3.14158"/> </default>
+      <default class="Jaw"> <joint axis="0 0 1" range="-0.2 2.0"/> </default>
+      <default class="visual">
+        <geom type="mesh" contype="0" conaffinity="0" density="0" group="2" material="blue"/>
+        <default class="motor_visual"> <geom material="black"/> </default>
+      </default>
+      <default class="collision">
+        <geom group="3" type="mesh"/>
+        <default class="finger_collision">
+          <geom type="box" solimp="0.8 0.90 0.001" solref="0.005 1" friction="1.5 0.005 0.0001"/>
+        </default>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="2 2 0.05" type="plane" material="floor_mat" condim="3"/>
+    
+    <!-- 坐标轴 (桌子右上角) -->
+    <site name="origin" pos="0.7 0.2 0.76" size="0.02" rgba="1 1 1 0.5" type="sphere"/>
+    <site name="x_axis" pos="0.8 0.2 0.76" size="0.01 0.1" rgba="1 0 0 1" type="cylinder" euler="0 1.5708 0"/>
+    <site name="y_axis" pos="0.7 0.3 0.76" size="0.01 0.1" rgba="0 1 0 1" type="cylinder" euler="1.5708 0 0"/>
+    <site name="z_axis" pos="0.7 0.2 0.86" size="0.01 0.1" rgba="0 0 1 1" type="cylinder"/>
+
+    <!-- Front Camera: 第三人称视角，从前方俯视场景，看向机械臂底座 -->
+    <camera name="camera_front_new" pos="0.28 0.12 1.0" mode="targetbody" target="Base"/>
+    
+    <!-- Side Camera: 侧视角（备用），看向机械臂底座 -->
+    <camera name="camera_side" pos="-0.4 -0.35 0.85" mode="targetbody" target="Base"/>
+
+    <body name="chair" pos="0 -0.7 0">
+        <geom type="cylinder" size="0.04 0.25" pos="0 0 0.25" material="black_plastic"/>
+        <geom type="box" size="0.25 0.25 0.05" pos="0 0 0.05" material="black_plastic"/>
+        <geom type="box" size="0.26 0.24 0.04" pos="0 0 0.5" material="fabric_dark"/>
+        <geom type="box" size="0.24 0.04 0.25" pos="0 -0.22 0.75" material="fabric_dark"/>
+        <geom type="cylinder" size="0.02 0.2" pos="0 -0.2 0.55" euler="1.57 0 0" material="black_plastic"/>
+        <geom type="cylinder" size="0.03 0.15" pos="-0.28 0 0.575" material="black_plastic"/>
+        <geom type="box" size="0.05 0.15 0.02" pos="-0.28 0 0.725" material="black_plastic"/>
+        <geom type="cylinder" size="0.03 0.15" pos="0.28 0 0.575" material="black_plastic"/>
+        <geom type="box" size="0.05 0.15 0.02" pos="0.28 0 0.725" material="black_plastic"/>
+        <geom name="paper_pad" type="box" size="0.06 0.08 0.001" pos="0.28 0.075 0.746" material="paper_white"/>
+        
+        <!-- 机械臂固定在椅子上（纸垫上方，相对椅子的坐标） -->
+        <body name="Base" childclass="so_arm100" pos="0.28 0.08 0.747" quat="0 0 0 1">
+            <geom type="mesh" mesh="Base" class="visual"/>
+            <geom type="mesh" mesh="Base_Motor" class="motor_visual"/>
+            <geom type="mesh" mesh="Base" class="collision"/>
+            <body name="Rotation_Pitch" pos="0 -0.0452 0.0165" quat="0.707105 0.707108 0 0">
+                <inertial pos="-9.07886e-05 0.0590972 0.031089" quat="0.363978 0.441169 -0.623108 0.533504" mass="0.119226" diaginertia="5.94278e-05 5.89975e-05 3.13712e-05"/>
+                <joint name="Rotation" class="Rotation"/>
+                <geom type="mesh" mesh="Rotation_Pitch" class="visual"/>
+                <geom type="mesh" mesh="Rotation_Pitch_Motor" class="motor_visual"/>
+                <geom type="mesh" mesh="Rotation_Pitch" class="collision"/>
+                <body name="Upper_Arm" pos="0 0.1025 0.0306" euler="1.57079 0 0">
+                    <inertial pos="-1.72052e-05 0.0701802 0.00310545" quat="0.50104 0.498994 -0.493562 0.50632" mass="0.162409" diaginertia="0.000213312 0.000167164 7.01522e-05"/>
+                    <joint name="Pitch" class="Pitch"/>
+                    <geom type="mesh" mesh="Upper_Arm" class="visual"/>
+                    <geom type="mesh" mesh="Upper_Arm_Motor" class="motor_visual"/>
+                    <geom type="mesh" mesh="Upper_Arm" class="collision"/>
+                    <body name="Lower_Arm" pos="0 0.11257 0.028" euler="-1.57079 0 0">
+                        <inertial pos="-0.00339604 0.00137796 0.0768007" quat="0.701995 0.0787996 0.0645626 0.704859" mass="0.147968" diaginertia="0.000138803 0.000107748 4.84242e-05"/>
+                        <joint name="Elbow" class="Elbow"/>
+                        <geom type="mesh" mesh="Lower_Arm" class="visual"/>
+                        <geom type="mesh" mesh="Lower_Arm_Motor" class="motor_visual"/>
+                        <geom type="mesh" mesh="Lower_Arm" class="collision"/>
+                        <body name="Wrist_Pitch_Roll" pos="0 0.0052 0.1349" euler="-1.57079 0 0">
+                            <inertial pos="-0.00852653 -0.0352279 -2.34622e-05" quat="-0.0522806 0.705235 0.0549524 0.704905" mass="0.0661321" diaginertia="3.45403e-05 2.39041e-05 1.94704e-05"/>
+                            <joint name="Wrist_Pitch" class="Wrist_Pitch"/>
+                            <geom type="mesh" mesh="Wrist_Pitch_Roll" class="visual"/>
+                            <geom type="mesh" mesh="Wrist_Pitch_Roll_Motor" class="motor_visual"/>
+                            <geom type="mesh" mesh="Wrist_Pitch_Roll" class="collision"/>
+                            <body name="Fixed_Jaw" pos="0 -0.0601 0" euler="0 1.57079 0">
+                                <inertial pos="0.00552377 -0.0280167 0.000483583" quat="0.41836 0.620891 -0.350644 0.562599" mass="0.0929859" diaginertia="5.03136e-05 4.64098e-05 2.72961e-05"/>
+                                <joint name="Wrist_Roll" class="Wrist_Roll"/>
+                                <geom type="mesh" mesh="Fixed_Jaw" class="visual"/>
+                                <geom type="mesh" mesh="Fixed_Jaw_Motor" class="motor_visual"/>
+                                <geom type="mesh" mesh="Fixed_Jaw_Collision_1" class="collision"/>
+                                <geom type="mesh" mesh="Fixed_Jaw_Collision_2" class="collision"/>
+                                <geom class="finger_collision" name="fixed_jaw_pad_1" size="0.001 0.005 0.004" pos="0.0089 -0.1014 0"/>
+                                <geom class="finger_collision" name="fixed_jaw_pad_2" size="0.001 0.005 0.006" pos="0.0109 -0.0914 0"/>
+                                <geom class="finger_collision" name="fixed_jaw_pad_3" size="0.001 0.01 0.007" pos="0.0126 -0.0768 0"/>
+                                <geom class="finger_collision" name="fixed_jaw_pad_4" size="0.001 0.01 0.008" pos="0.0143 -0.0572 0"/>
+                                
+                                <!-- Wrist Camera: 第一人称视角，固定在夹爪根部，聚焦夹爪前端 -->  
+                                <!-- 可视化标记：相机位置（黑色球体） -->
+                                <site name="camera_wrist_marker" pos="0.01 -0.05 0.045" size="0.005" rgba="0 0 0 1" type="sphere"/>
+                                <camera name="camera_wrist" pos="0.01 -0.05 0.045" mode="targetbody" target="jaw_tip_target" fovy="70"/>
+                                <body name="Moving_Jaw" pos="-0.0202 -0.0244 0" quat="1.34924e-11 -3.67321e-06 1 -3.67321e-06">
+                                    <inertial pos="-0.00161745 -0.0303473 0.000449646" quat="0.696562 0.716737 -0.0239844 -0.0227026" mass="0.0202444" diaginertia="1.11265e-05 8.99651e-06 2.99548e-06"/>
+                                    <joint name="Jaw" class="Jaw"/>
+                                    <geom type="mesh" mesh="Moving_Jaw" class="visual"/>
+                                    <geom type="mesh" mesh="Moving_Jaw_Collision_1" class="collision"/>
+                                    <geom type="mesh" mesh="Moving_Jaw_Collision_2" class="collision"/>
+                                    <geom type="mesh" mesh="Moving_Jaw_Collision_3" class="collision"/>
+                                    <geom class="finger_collision" name="moving_jaw_pad_1" size="0.001 0.005 0.004" pos="-0.0113 -0.077 0"/>
+                                    <geom class="finger_collision" name="moving_jaw_pad_2" size="0.001 0.005 0.006" pos="-0.0093 -0.067 0"/>
+                                    <geom class="finger_collision" name="moving_jaw_pad_3" size="0.001 0.01 0.006" pos="-0.0073 -0.055 0"/>
+                                    <geom class="finger_collision" name="moving_jaw_pad_4" size="0.001 0.01 0.008" pos="-0.0073 -0.035 0"/>
+                                    
+                                    <!-- 夹爪尾部虚拟 Body：专门用作相机 target（无质量、无碰撞） -->
+                                    <body name="jaw_tip_target" pos="-0.011 -0.085 0">
+                                        <!-- 可视化标记（绿色透明小球） -->
+                                        <site name="jaw_tip_site" pos="0 0 0" size="0.003" rgba="0 1 0 0" type="sphere"/>
+                                    </body>
+                                </body>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </body>
+
+    <body name="robot_table" pos="0 -0.15 0.73">
+        <geom type="box" size="0.8 0.4 0.02" material="wood_table" 
+              solimp="0.99 0.99 0.001" 
+              solref="0.002 1"
+              condim="6"/>
+        <geom type="cylinder" size="0.03 0.355" pos="-0.75 -0.35 -0.375" material="black_plastic"/>
+        <geom type="cylinder" size="0.03 0.355" pos="0.75 -0.35 -0.375" material="black_plastic"/>
+        <geom type="cylinder" size="0.03 0.355" pos="-0.75 0.35 -0.375" material="black_plastic"/>
+        <geom type="cylinder" size="0.03 0.355" pos="0.75 0.35 -0.375" material="black_plastic"/>
+    </body>
+
+    <body name="paper_box" pos="0.01 -0.35 0.79">
+        <freejoint/>
+        <!-- 底面（盒子内底） - 增加质量到300g -->
+        <geom type="box" size="0.06 0.08 0.0005" material="box_inside_mat" 
+              mass="0.3"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        
+        <!-- 前墙 - 增加质量 -->
+        <geom type="box" size="0.06 0.04 0.002" pos="0 -0.081 0.04" euler="1.5708 0 0" 
+              material="box_front_mat" mass="0.05"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        <geom type="box" size="0.06 0.04 0.001" pos="0 -0.079 0.04" euler="1.5708 0 0" 
+              material="box_inside_mat" mass="0.02"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        
+        <!-- 后墙 - 增加质量 -->
+        <geom type="box" size="0.06 0.04 0.002" pos="0 0.081 0.04" euler="1.5708 3.1416 0" 
+              material="box_front_mat" mass="0.05"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        <geom type="box" size="0.06 0.04 0.001" pos="0 0.079 0.04" euler="1.5708 0 0" 
+              material="box_inside_mat" mass="0.02"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        
+        <!-- 左墙 - 增加质量 -->
+        <geom type="box" size="0.08 0.04 0.002" pos="-0.061 0 0.04" euler="0 1.5708 -1.5708" 
+              material="box_side_mat" mass="0.05"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        <geom type="box" size="0.08 0.04 0.001" pos="-0.059 0 0.04" euler="0 1.5708 -1.5708" 
+              material="box_inside_mat" mass="0.02"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        
+        <!-- 右墙 - 增加质量 -->
+        <geom type="box" size="0.08 0.04 0.002" pos="0.061 0 0.04" euler="0 -1.5708 1.5708" 
+              material="box_side_mat" mass="0.05"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+        <geom type="box" size="0.08 0.04 0.001" pos="0.059 0 0.04" euler="0 -1.5708 1.5708" 
+              material="box_inside_mat" mass="0.02"
+              solimp="0.99 0.99 0.001" solref="0.002 1"/>
+    </body>
+
+    <body name="pen1" pos="0.2 -0.4 0.756" quat="0.7071 0.7071 0 0">
+        <freejoint/>
+        
+        <geom type="mesh" mesh="pen1_mesh" material="pen1_mat"
+              pos="0 0 -0.063"
+              euler="1.5708 0 0"
+              group="2" contype="0" conaffinity="0" mass="0"/>
+
+        <geom type="capsule" 
+              mass="0.012" 
+              size="0.00415 0.055" 
+              pos="0 0 -0.005" 
+              euler="0 0 0"
+              rgba="1 0 0 0"
+              condim="6" friction="1.0 0.005 0.0001"
+              solimp="0.95 0.99 0.001" solref="0.004 1"/>
+    </body>
+    
+    <body name="pen_2" pos="0.25 -0.35 0.756" quat="0.7071 0.7071 0 0">
+        <freejoint/>
+        <geom type="mesh" mesh="pen_mesh" material="pen2_mat" 
+              group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="capsule" 
+              mass="0.015"
+              size="0.00465 0.056" 
+              pos="0 0 0.044" 
+              euler="0 0 0"
+              rgba="1 0 0 0" 
+              condim="6" friction="1.2 0.005 0.0001"
+              solimp="0.95 0.99 0.001" solref="0.004 1"/>
+    </body>
+
+    <body name="pen_3" pos="0.35 -0.35 0.756" quat="0.7071 0.7071 0 0">
+        <freejoint/>
+        <geom type="mesh" mesh="pen_mesh" material="pen3_mat" 
+              group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="capsule" 
+              mass="0.015"
+              size="0.00465 0.056" 
+              pos="0 0 0.044" 
+              euler="0 0 0"
+              rgba="1 0 0 0" 
+              condim="6" friction="1.2 0.005 0.0001"
+              solimp="0.95 0.99 0.001" solref="0.004 1"/>
+    </body>
+
+    <body name="pen_4" pos="0.3 -0.35 0.756" quat="0.7071 0.7071 0 0">
+        <freejoint/>
+        <geom type="mesh" mesh="pen_mesh" material="pen4_mat" 
+              group="2" contype="0" conaffinity="0" mass="0"/>
+        <geom type="capsule" 
+              mass="0.015"
+              size="0.00465 0.056" 
+              pos="0 0 0.044" 
+              euler="0 0 0"
+              rgba="1 0 0 0" 
+              condim="6" friction="1.2 0.005 0.0001"
+              solimp="0.95 0.99 0.001" solref="0.004 1"/>
+    </body>
+
+  </worldbody>
+
+  <actuator>
+    <position class="Rotation" name="Rotation" joint="Rotation"/>
+    <position class="Pitch" name="Pitch" joint="Pitch"/>
+    <position class="Elbow" name="Elbow" joint="Elbow"/>
+    <position class="Wrist_Pitch" name="Wrist_Pitch" joint="Wrist_Pitch"/>
+    <position class="Wrist_Roll" name="Wrist_Roll" joint="Wrist_Roll"/>
+    <position class="Jaw" name="Jaw" joint="Jaw"/>
+  </actuator>
+
+  <contact>
+    <exclude body1="Base" body2="Rotation_Pitch"/>
+  </contact>
+
+  <!-- 初始姿态关键帧 -->
+  <!-- qpos顺序: 6个机器人关节 + 1个纸盒(7) + 4支笔(4x7=28) = 6+7+28=41 -->
+  <!-- freejoint格式: x y z qw qx qy qz -->
+  <keyframe>
+    <key name="home" qpos="0 -3.14 3.14 0.817 0 -0.157 0.075 -0.45 0.753 1 0 0 0 0.2 -0.4 0.756 0.7071 0.7071 0 0 0.25 -0.35 0.756 0.7071 0.7071 0 0 0.3 -0.35 0.756 0.7071 0.7071 0 0 0.35 -0.35 0.756 0.7071 0.7071 0 0" ctrl="0 -3.14 3.14 0.817 0 -0.157"/>
+  </keyframe>
+
+</mujoco>

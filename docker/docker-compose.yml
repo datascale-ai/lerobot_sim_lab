@@ -1,0 +1,54 @@
+services:
+  mujoco-jupyter:
+    # build: .  <-- 注释掉构建，直接使用指定镜像
+    image: mujoco-lab-vnc:latest
+    container_name: mujoco-jupyter
+    runtime: nvidia  # 使用 NVIDIA runtime
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+      - MUJOCO_GL=egl
+    ports:
+      - "8889:8888"  # JupyterLab (Changed to 8889 to avoid conflict)
+      - "5902:5901"  # VNC Port (Mapped to 5902 on host)
+    command: ["vnc"]
+    volumes:
+      - ..:/app
+    shm_size: '8gb'  # 增加共享内存，防止 PyTorch DataLoader 出错
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  mujoco-vnc-final:
+    image: mujoco-lab-vnc:latest
+    container_name: mujoco-vnc-final
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+      - MUJOCO_GL=egl
+    ports:
+      - "5901:5901"
+      - "8080:8080"
+      - "5555:5555"
+    command: ["vnc"]
+    volumes:
+      - ..:/app
+    shm_size: '8gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    stdin_open: true
+    tty: true

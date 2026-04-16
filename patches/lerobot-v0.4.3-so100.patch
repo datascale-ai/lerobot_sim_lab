@@ -1,0 +1,3199 @@
+--- a/robots/so100_follower/__init__.py
++++ b/robots/so100_follower/__init__.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from .config_so100_follower import SO100FollowerConfig
++from .so100_follower import SO100Follower
+--- a/robots/so100_follower/config_so100_follower.py
++++ b/robots/so100_follower/config_so100_follower.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass, field
++
++from lerobot.cameras import CameraConfig
++
++from ..config import RobotConfig
++
++
++@RobotConfig.register_subclass("so100_follower")
++@dataclass
++class SO100FollowerConfig(RobotConfig):
++    # Port to connect to the arm
++    port: str
++
++    disable_torque_on_disconnect: bool = True
++
++    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
++    # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor
++    # names to the max_relative_target value for that motor.
++    max_relative_target: float | dict[str, float] | None = None
++
++    # cameras
++    cameras: dict[str, CameraConfig] = field(default_factory=dict)
++
++    # Set to `True` for backward compatibility with previous policies/dataset
++    use_degrees: bool = False
+--- a/robots/so100_follower/robot_kinematic_processor.py
++++ b/robots/so100_follower/robot_kinematic_processor.py
+@@ -0,0 +1,610 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass, field
++from typing import Any
++
++import numpy as np
++
++from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
++from lerobot.model.kinematics import RobotKinematics
++from lerobot.processor import (
++    EnvTransition,
++    ObservationProcessorStep,
++    ProcessorStep,
++    ProcessorStepRegistry,
++    RobotAction,
++    RobotActionProcessorStep,
++    TransitionKey,
++)
++from lerobot.utils.rotation import Rotation
++
++
++@ProcessorStepRegistry.register("ee_reference_and_delta")
++@dataclass
++class EEReferenceAndDelta(RobotActionProcessorStep):
++    """
++    Computes a target end-effector pose from a relative delta command.
++
++    This step takes a desired change in position and orientation (`target_*`) and applies it to a
++    reference end-effector pose to calculate an absolute target pose. The reference pose is derived
++    from the current robot joint positions using forward kinematics.
++
++    The processor can operate in two modes:
++    1.  `use_latched_reference=True`: The reference pose is "latched" or saved at the moment the action
++        is first enabled. Subsequent commands are relative to this fixed reference.
++    2.  `use_latched_reference=False`: The reference pose is updated to the robot's current pose at
++        every step.
++
++    Attributes:
++        kinematics: The robot's kinematic model for forward kinematics.
++        end_effector_step_sizes: A dictionary scaling the input delta commands.
++        motor_names: A list of motor names required for forward kinematics.
++        use_latched_reference: If True, latch the reference pose on enable; otherwise, always use the
++            current pose as the reference.
++        reference_ee_pose: Internal state storing the latched reference pose.
++        _prev_enabled: Internal state to detect the rising edge of the enable signal.
++        _command_when_disabled: Internal state to hold the last command while disabled.
++    """
++
++    kinematics: RobotKinematics
++    end_effector_step_sizes: dict
++    motor_names: list[str]
++    use_latched_reference: bool = (
++        True  # If True, latch reference on enable; if False, always use current pose
++    )
++    use_ik_solution: bool = False
++
++    reference_ee_pose: np.ndarray | None = field(default=None, init=False, repr=False)
++    _prev_enabled: bool = field(default=False, init=False, repr=False)
++    _command_when_disabled: np.ndarray | None = field(default=None, init=False, repr=False)
++
++    def action(self, action: RobotAction) -> RobotAction:
++        observation = self.transition.get(TransitionKey.OBSERVATION).copy()
++
++        if observation is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        if self.use_ik_solution and "IK_solution" in self.transition.get(TransitionKey.COMPLEMENTARY_DATA):
++            q_raw = self.transition.get(TransitionKey.COMPLEMENTARY_DATA)["IK_solution"]
++        else:
++            q_raw = np.array(
++                [
++                    float(v)
++                    for k, v in observation.items()
++                    if isinstance(k, str)
++                    and k.endswith(".pos")
++                    and k.removesuffix(".pos") in self.motor_names
++                ],
++                dtype=float,
++            )
++
++        if q_raw is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        # Current pose from FK on measured joints
++        t_curr = self.kinematics.forward_kinematics(q_raw)
++
++        enabled = bool(action.pop("enabled"))
++        tx = float(action.pop("target_x"))
++        ty = float(action.pop("target_y"))
++        tz = float(action.pop("target_z"))
++        wx = float(action.pop("target_wx"))
++        wy = float(action.pop("target_wy"))
++        wz = float(action.pop("target_wz"))
++        gripper_vel = float(action.pop("gripper_vel"))
++
++        desired = None
++
++        if enabled:
++            ref = t_curr
++            if self.use_latched_reference:
++                # Latched reference mode: latch reference at the rising edge
++                if not self._prev_enabled or self.reference_ee_pose is None:
++                    self.reference_ee_pose = t_curr.copy()
++                ref = self.reference_ee_pose if self.reference_ee_pose is not None else t_curr
++
++            delta_p = np.array(
++                [
++                    tx * self.end_effector_step_sizes["x"],
++                    ty * self.end_effector_step_sizes["y"],
++                    tz * self.end_effector_step_sizes["z"],
++                ],
++                dtype=float,
++            )
++            r_abs = Rotation.from_rotvec([wx, wy, wz]).as_matrix()
++            desired = np.eye(4, dtype=float)
++            desired[:3, :3] = ref[:3, :3] @ r_abs
++            desired[:3, 3] = ref[:3, 3] + delta_p
++
++            self._command_when_disabled = desired.copy()
++        else:
++            # While disabled, keep sending the same command to avoid drift.
++            if self._command_when_disabled is None:
++                # If we've never had an enabled command yet, freeze current FK pose once.
++                self._command_when_disabled = t_curr.copy()
++            desired = self._command_when_disabled.copy()
++
++        # Write action fields
++        pos = desired[:3, 3]
++        tw = Rotation.from_matrix(desired[:3, :3]).as_rotvec()
++        action["ee.x"] = float(pos[0])
++        action["ee.y"] = float(pos[1])
++        action["ee.z"] = float(pos[2])
++        action["ee.wx"] = float(tw[0])
++        action["ee.wy"] = float(tw[1])
++        action["ee.wz"] = float(tw[2])
++        action["ee.gripper_vel"] = gripper_vel
++
++        self._prev_enabled = enabled
++        return action
++
++    def reset(self):
++        """Resets the internal state of the processor."""
++        self._prev_enabled = False
++        self.reference_ee_pose = None
++        self._command_when_disabled = None
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        for feat in [
++            "enabled",
++            "target_x",
++            "target_y",
++            "target_z",
++            "target_wx",
++            "target_wy",
++            "target_wz",
++            "gripper_vel",
++        ]:
++            features[PipelineFeatureType.ACTION].pop(f"{feat}", None)
++
++        for feat in ["x", "y", "z", "wx", "wy", "wz", "gripper_vel"]:
++            features[PipelineFeatureType.ACTION][f"ee.{feat}"] = PolicyFeature(
++                type=FeatureType.ACTION, shape=(1,)
++            )
++
++        return features
++
++
++@ProcessorStepRegistry.register("ee_bounds_and_safety")
++@dataclass
++class EEBoundsAndSafety(RobotActionProcessorStep):
++    """
++    Clips the end-effector pose to predefined bounds and checks for unsafe jumps.
++
++    This step ensures that the target end-effector pose remains within a safe operational workspace.
++    It also moderates the command to prevent large, sudden movements between consecutive steps.
++
++    Attributes:
++        end_effector_bounds: A dictionary with "min" and "max" keys for position clipping.
++        max_ee_step_m: The maximum allowed change in position (in meters) between steps.
++        _last_pos: Internal state storing the last commanded position.
++    """
++
++    end_effector_bounds: dict
++    max_ee_step_m: float = 0.05
++    _last_pos: np.ndarray | None = field(default=None, init=False, repr=False)
++
++    def action(self, action: RobotAction) -> RobotAction:
++        x = action["ee.x"]
++        y = action["ee.y"]
++        z = action["ee.z"]
++        wx = action["ee.wx"]
++        wy = action["ee.wy"]
++        wz = action["ee.wz"]
++        # TODO(Steven): ee.gripper_vel does not need to be bounded
++
++        if None in (x, y, z, wx, wy, wz):
++            raise ValueError(
++                "Missing required end-effector pose components: x, y, z, wx, wy, wz must all be present in action"
++            )
++
++        pos = np.array([x, y, z], dtype=float)
++        twist = np.array([wx, wy, wz], dtype=float)
++
++        # Clip position
++        pos = np.clip(pos, self.end_effector_bounds["min"], self.end_effector_bounds["max"])
++
++        # Check for jumps in position
++        if self._last_pos is not None:
++            dpos = pos - self._last_pos
++            n = float(np.linalg.norm(dpos))
++            if n > self.max_ee_step_m and n > 0:
++                pos = self._last_pos + dpos * (self.max_ee_step_m / n)
++                raise ValueError(f"EE jump {n:.3f}m > {self.max_ee_step_m}m")
++
++        self._last_pos = pos
++
++        action["ee.x"] = float(pos[0])
++        action["ee.y"] = float(pos[1])
++        action["ee.z"] = float(pos[2])
++        action["ee.wx"] = float(twist[0])
++        action["ee.wy"] = float(twist[1])
++        action["ee.wz"] = float(twist[2])
++        return action
++
++    def reset(self):
++        """Resets the last known position and orientation."""
++        self._last_pos = None
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        return features
++
++
++@ProcessorStepRegistry.register("inverse_kinematics_ee_to_joints")
++@dataclass
++class InverseKinematicsEEToJoints(RobotActionProcessorStep):
++    """
++    Computes desired joint positions from a target end-effector pose using inverse kinematics (IK).
++
++    This step translates a Cartesian command (position and orientation of the end-effector) into
++    the corresponding joint-space commands for each motor.
++
++    Attributes:
++        kinematics: The robot's kinematic model for inverse kinematics.
++        motor_names: A list of motor names for which to compute joint positions.
++        q_curr: Internal state storing the last joint positions, used as an initial guess for the IK solver.
++        initial_guess_current_joints: If True, use the robot's current joint state as the IK guess.
++            If False, use the solution from the previous step.
++    """
++
++    kinematics: RobotKinematics
++    motor_names: list[str]
++    q_curr: np.ndarray | None = field(default=None, init=False, repr=False)
++    initial_guess_current_joints: bool = True
++
++    def action(self, action: RobotAction) -> RobotAction:
++        x = action.pop("ee.x")
++        y = action.pop("ee.y")
++        z = action.pop("ee.z")
++        wx = action.pop("ee.wx")
++        wy = action.pop("ee.wy")
++        wz = action.pop("ee.wz")
++        gripper_pos = action.pop("ee.gripper_pos")
++
++        if None in (x, y, z, wx, wy, wz, gripper_pos):
++            raise ValueError(
++                "Missing required end-effector pose components: ee.x, ee.y, ee.z, ee.wx, ee.wy, ee.wz, ee.gripper_pos must all be present in action"
++            )
++
++        observation = self.transition.get(TransitionKey.OBSERVATION).copy()
++        if observation is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        q_raw = np.array(
++            [float(v) for k, v in observation.items() if isinstance(k, str) and k.endswith(".pos")],
++            dtype=float,
++        )
++        if q_raw is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        if self.initial_guess_current_joints:  # Use current joints as initial guess
++            self.q_curr = q_raw
++        else:  # Use previous ik solution as initial guess
++            if self.q_curr is None:
++                self.q_curr = q_raw
++
++        # Build desired 4x4 transform from pos + rotvec (twist)
++        t_des = np.eye(4, dtype=float)
++        t_des[:3, :3] = Rotation.from_rotvec([wx, wy, wz]).as_matrix()
++        t_des[:3, 3] = [x, y, z]
++
++        # Compute inverse kinematics
++        q_target = self.kinematics.inverse_kinematics(self.q_curr, t_des)
++        self.q_curr = q_target
++
++        # TODO: This is sentitive to order of motor_names = q_target mapping
++        for i, name in enumerate(self.motor_names):
++            if name != "gripper":
++                action[f"{name}.pos"] = float(q_target[i])
++            else:
++                action["gripper.pos"] = float(gripper_pos)
++
++        return action
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        for feat in ["x", "y", "z", "wx", "wy", "wz", "gripper_pos"]:
++            features[PipelineFeatureType.ACTION].pop(f"ee.{feat}", None)
++
++        for name in self.motor_names:
++            features[PipelineFeatureType.ACTION][f"{name}.pos"] = PolicyFeature(
++                type=FeatureType.ACTION, shape=(1,)
++            )
++
++        return features
++
++    def reset(self):
++        """Resets the initial guess for the IK solver."""
++        self.q_curr = None
++
++
++@ProcessorStepRegistry.register("gripper_velocity_to_joint")
++@dataclass
++class GripperVelocityToJoint(RobotActionProcessorStep):
++    """
++    Converts a gripper velocity command into a target gripper joint position.
++
++    This step integrates a normalized velocity command over time to produce a position command,
++    taking the current gripper position as a starting point. It also supports a discrete mode
++    where integer actions map to open, close, or no-op.
++
++    Attributes:
++        motor_names: A list of motor names, which must include 'gripper'.
++        speed_factor: A scaling factor to convert the normalized velocity command to a position change.
++        clip_min: The minimum allowed gripper joint position.
++        clip_max: The maximum allowed gripper joint position.
++        discrete_gripper: If True, treat the input action as discrete (0: open, 1: close, 2: stay).
++    """
++
++    speed_factor: float = 20.0
++    clip_min: float = 0.0
++    clip_max: float = 100.0
++    discrete_gripper: bool = False
++
++    def action(self, action: RobotAction) -> RobotAction:
++        observation = self.transition.get(TransitionKey.OBSERVATION).copy()
++
++        gripper_vel = action.pop("ee.gripper_vel")
++
++        if observation is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        q_raw = np.array(
++            [float(v) for k, v in observation.items() if isinstance(k, str) and k.endswith(".pos")],
++            dtype=float,
++        )
++        if q_raw is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        if self.discrete_gripper:
++            # Discrete gripper actions are in [0, 1, 2]
++            # 0: open, 1: close, 2: stay
++            # We need to shift them to [-1, 0, 1] and then scale them to clip_max
++            gripper_vel = (gripper_vel - 1) * self.clip_max
++
++        # Compute desired gripper position
++        delta = gripper_vel * float(self.speed_factor)
++        # TODO: This assumes gripper is the last specified joint in the robot
++        gripper_pos = float(np.clip(q_raw[-1] + delta, self.clip_min, self.clip_max))
++        action["ee.gripper_pos"] = gripper_pos
++
++        return action
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        features[PipelineFeatureType.ACTION].pop("ee.gripper_vel", None)
++        features[PipelineFeatureType.ACTION]["ee.gripper_pos"] = PolicyFeature(
++            type=FeatureType.ACTION, shape=(1,)
++        )
++
++        return features
++
++
++def compute_forward_kinematics_joints_to_ee(
++    joints: dict[str, Any], kinematics: RobotKinematics, motor_names: list[str]
++) -> dict[str, Any]:
++    motor_joint_values = [joints[f"{n}.pos"] for n in motor_names]
++
++    q = np.array(motor_joint_values, dtype=float)
++    t = kinematics.forward_kinematics(q)
++    pos = t[:3, 3]
++    tw = Rotation.from_matrix(t[:3, :3]).as_rotvec()
++    gripper_pos = joints["gripper.pos"]
++    for n in motor_names:
++        joints.pop(f"{n}.pos")
++    joints["ee.x"] = float(pos[0])
++    joints["ee.y"] = float(pos[1])
++    joints["ee.z"] = float(pos[2])
++    joints["ee.wx"] = float(tw[0])
++    joints["ee.wy"] = float(tw[1])
++    joints["ee.wz"] = float(tw[2])
++    joints["ee.gripper_pos"] = float(gripper_pos)
++    return joints
++
++
++@ProcessorStepRegistry.register("forward_kinematics_joints_to_ee_observation")
++@dataclass
++class ForwardKinematicsJointsToEEObservation(ObservationProcessorStep):
++    """
++    Computes the end-effector pose from joint positions using forward kinematics (FK).
++
++    This step is typically used to add the robot's Cartesian pose to the observation space,
++    which can be useful for visualization or as an input to a policy.
++
++    Attributes:
++        kinematics: The robot's kinematic model.
++    """
++
++    kinematics: RobotKinematics
++    motor_names: list[str]
++
++    def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
++        return compute_forward_kinematics_joints_to_ee(observation, self.kinematics, self.motor_names)
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        # We only use the ee pose in the dataset, so we don't need the joint positions
++        for n in self.motor_names:
++            features[PipelineFeatureType.OBSERVATION].pop(f"{n}.pos", None)
++        # We specify the dataset features of this step that we want to be stored in the dataset
++        for k in ["x", "y", "z", "wx", "wy", "wz", "gripper_pos"]:
++            features[PipelineFeatureType.OBSERVATION][f"ee.{k}"] = PolicyFeature(
++                type=FeatureType.STATE, shape=(1,)
++            )
++        return features
++
++
++@ProcessorStepRegistry.register("forward_kinematics_joints_to_ee_action")
++@dataclass
++class ForwardKinematicsJointsToEEAction(RobotActionProcessorStep):
++    """
++    Computes the end-effector pose from joint positions using forward kinematics (FK).
++
++    This step is typically used to add the robot's Cartesian pose to the observation space,
++    which can be useful for visualization or as an input to a policy.
++
++    Attributes:
++        kinematics: The robot's kinematic model.
++    """
++
++    kinematics: RobotKinematics
++    motor_names: list[str]
++
++    def action(self, action: RobotAction) -> RobotAction:
++        return compute_forward_kinematics_joints_to_ee(action, self.kinematics, self.motor_names)
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        # We only use the ee pose in the dataset, so we don't need the joint positions
++        for n in self.motor_names:
++            features[PipelineFeatureType.ACTION].pop(f"{n}.pos", None)
++        # We specify the dataset features of this step that we want to be stored in the dataset
++        for k in ["x", "y", "z", "wx", "wy", "wz", "gripper_pos"]:
++            features[PipelineFeatureType.ACTION][f"ee.{k}"] = PolicyFeature(
++                type=FeatureType.STATE, shape=(1,)
++            )
++        return features
++
++
++@ProcessorStepRegistry.register(name="forward_kinematics_joints_to_ee")
++@dataclass
++class ForwardKinematicsJointsToEE(ProcessorStep):
++    kinematics: RobotKinematics
++    motor_names: list[str]
++
++    def __post_init__(self):
++        self.joints_to_ee_action_processor = ForwardKinematicsJointsToEEAction(
++            kinematics=self.kinematics, motor_names=self.motor_names
++        )
++        self.joints_to_ee_observation_processor = ForwardKinematicsJointsToEEObservation(
++            kinematics=self.kinematics, motor_names=self.motor_names
++        )
++
++    def __call__(self, transition: EnvTransition) -> EnvTransition:
++        if transition.get(TransitionKey.ACTION) is not None:
++            transition = self.joints_to_ee_action_processor(transition)
++        if transition.get(TransitionKey.OBSERVATION) is not None:
++            transition = self.joints_to_ee_observation_processor(transition)
++        return transition
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        if features[PipelineFeatureType.ACTION] is not None:
++            features = self.joints_to_ee_action_processor.transform_features(features)
++        if features[PipelineFeatureType.OBSERVATION] is not None:
++            features = self.joints_to_ee_observation_processor.transform_features(features)
++        return features
++
++
++@ProcessorStepRegistry.register("inverse_kinematics_rl_step")
++@dataclass
++class InverseKinematicsRLStep(ProcessorStep):
++    """
++    Computes desired joint positions from a target end-effector pose using inverse kinematics (IK).
++
++    This is modified from the InverseKinematicsEEToJoints step to be used in the RL pipeline.
++    """
++
++    kinematics: RobotKinematics
++    motor_names: list[str]
++    q_curr: np.ndarray | None = field(default=None, init=False, repr=False)
++    initial_guess_current_joints: bool = True
++
++    def __call__(self, transition: EnvTransition) -> EnvTransition:
++        new_transition = dict(transition)
++        action = new_transition.get(TransitionKey.ACTION)
++        if action is None:
++            raise ValueError("Action is required for InverseKinematicsEEToJoints")
++        action = dict(action)
++
++        x = action.pop("ee.x")
++        y = action.pop("ee.y")
++        z = action.pop("ee.z")
++        wx = action.pop("ee.wx")
++        wy = action.pop("ee.wy")
++        wz = action.pop("ee.wz")
++        gripper_pos = action.pop("ee.gripper_pos")
++
++        if None in (x, y, z, wx, wy, wz, gripper_pos):
++            raise ValueError(
++                "Missing required end-effector pose components: ee.x, ee.y, ee.z, ee.wx, ee.wy, ee.wz, ee.gripper_pos must all be present in action"
++            )
++
++        observation = new_transition.get(TransitionKey.OBSERVATION).copy()
++        if observation is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        q_raw = np.array(
++            [float(v) for k, v in observation.items() if isinstance(k, str) and k.endswith(".pos")],
++            dtype=float,
++        )
++        if q_raw is None:
++            raise ValueError("Joints observation is require for computing robot kinematics")
++
++        if self.initial_guess_current_joints:  # Use current joints as initial guess
++            self.q_curr = q_raw
++        else:  # Use previous ik solution as initial guess
++            if self.q_curr is None:
++                self.q_curr = q_raw
++
++        # Build desired 4x4 transform from pos + rotvec (twist)
++        t_des = np.eye(4, dtype=float)
++        t_des[:3, :3] = Rotation.from_rotvec([wx, wy, wz]).as_matrix()
++        t_des[:3, 3] = [x, y, z]
++
++        # Compute inverse kinematics
++        q_target = self.kinematics.inverse_kinematics(self.q_curr, t_des)
++        self.q_curr = q_target
++
++        # TODO: This is sentitive to order of motor_names = q_target mapping
++        for i, name in enumerate(self.motor_names):
++            if name != "gripper":
++                action[f"{name}.pos"] = float(q_target[i])
++            else:
++                action["gripper.pos"] = float(gripper_pos)
++
++        new_transition[TransitionKey.ACTION] = action
++        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
++        complementary_data["IK_solution"] = q_target
++        new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
++        return new_transition
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        for feat in ["x", "y", "z", "wx", "wy", "wz", "gripper_pos"]:
++            features[PipelineFeatureType.ACTION].pop(f"ee.{feat}", None)
++
++        for name in self.motor_names:
++            features[PipelineFeatureType.ACTION][f"{name}.pos"] = PolicyFeature(
++                type=FeatureType.ACTION, shape=(1,)
++            )
++
++        return features
++
++    def reset(self):
++        """Resets the initial guess for the IK solver."""
++        self.q_curr = None
+--- a/robots/so100_follower/so100_follower.py
++++ b/robots/so100_follower/so100_follower.py
+@@ -0,0 +1,232 @@
++#!/usr/bin/env python
++
++# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import logging
++import time
++from functools import cached_property
++from typing import Any
++
++from lerobot.cameras.utils import make_cameras_from_configs
++from lerobot.motors import Motor, MotorCalibration, MotorNormMode
++from lerobot.motors.feetech import (
++    FeetechMotorsBus,
++    OperatingMode,
++)
++from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
++
++from ..robot import Robot
++from ..utils import ensure_safe_goal_position
++from .config_so100_follower import SO100FollowerConfig
++
++logger = logging.getLogger(__name__)
++
++
++class SO100Follower(Robot):
++    """
++    [SO-100 Follower Arm](https://github.com/TheRobotStudio/SO-ARM100) designed by TheRobotStudio
++    """
++
++    config_class = SO100FollowerConfig
++    name = "so100_follower"
++
++    def __init__(self, config: SO100FollowerConfig):
++        super().__init__(config)
++        self.config = config
++        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
++        self.bus = FeetechMotorsBus(
++            port=self.config.port,
++            motors={
++                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
++                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
++                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
++                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
++                "wrist_roll": Motor(5, "sts3215", norm_mode_body),
++                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
++            },
++            calibration=self.calibration,
++        )
++        self.cameras = make_cameras_from_configs(config.cameras)
++
++    @property
++    def _motors_ft(self) -> dict[str, type]:
++        return {f"{motor}.pos": float for motor in self.bus.motors}
++
++    @property
++    def _cameras_ft(self) -> dict[str, tuple]:
++        return {
++            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
++        }
++
++    @cached_property
++    def observation_features(self) -> dict[str, type | tuple]:
++        return {**self._motors_ft, **self._cameras_ft}
++
++    @cached_property
++    def action_features(self) -> dict[str, type]:
++        return self._motors_ft
++
++    @property
++    def is_connected(self) -> bool:
++        return self.bus.is_connected and all(cam.is_connected for cam in self.cameras.values())
++
++    def connect(self, calibrate: bool = True) -> None:
++        """
++        We assume that at connection time, arm is in a rest position,
++        and torque can be safely disabled to run calibration.
++        """
++        if self.is_connected:
++            raise DeviceAlreadyConnectedError(f"{self} already connected")
++
++        self.bus.connect()
++        if not self.is_calibrated and calibrate:
++            logger.info(
++                "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
++            )
++            self.calibrate()
++
++        for cam in self.cameras.values():
++            cam.connect()
++
++        self.configure()
++        logger.info(f"{self} connected.")
++
++    @property
++    def is_calibrated(self) -> bool:
++        return self.bus.is_calibrated
++
++    def calibrate(self) -> None:
++        if self.calibration:
++            # Calibration file exists, ask user whether to use it or run new calibration
++            user_input = input(
++                f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "
++            )
++            if user_input.strip().lower() != "c":
++                logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
++                self.bus.write_calibration(self.calibration)
++                return
++
++        logger.info(f"\nRunning calibration of {self}")
++        self.bus.disable_torque()
++        for motor in self.bus.motors:
++            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++
++        input(f"Move {self} to the middle of its range of motion and press ENTER....")
++        homing_offsets = self.bus.set_half_turn_homings()
++
++        full_turn_motor = "wrist_roll"
++        unknown_range_motors = [motor for motor in self.bus.motors if motor != full_turn_motor]
++        print(
++            f"Move all joints except '{full_turn_motor}' sequentially through their "
++            "entire ranges of motion.\nRecording positions. Press ENTER to stop..."
++        )
++        range_mins, range_maxes = self.bus.record_ranges_of_motion(unknown_range_motors)
++        range_mins[full_turn_motor] = 0
++        range_maxes[full_turn_motor] = 4095
++
++        self.calibration = {}
++        for motor, m in self.bus.motors.items():
++            self.calibration[motor] = MotorCalibration(
++                id=m.id,
++                drive_mode=0,
++                homing_offset=homing_offsets[motor],
++                range_min=range_mins[motor],
++                range_max=range_maxes[motor],
++            )
++
++        self.bus.write_calibration(self.calibration)
++        self._save_calibration()
++        print("Calibration saved to", self.calibration_fpath)
++
++    def configure(self) -> None:
++        with self.bus.torque_disabled():
++            self.bus.configure_motors()
++            for motor in self.bus.motors:
++                self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++                # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
++                self.bus.write("P_Coefficient", motor, 16)
++                # Set I_Coefficient and D_Coefficient to default value 0 and 32
++                self.bus.write("I_Coefficient", motor, 0)
++                self.bus.write("D_Coefficient", motor, 32)
++
++                if motor == "gripper":
++                    self.bus.write("Max_Torque_Limit", motor, 500)  # 50% of max torque to avoid burnout
++                    self.bus.write("Protection_Current", motor, 250)  # 50% of max current to avoid burnout
++                    self.bus.write("Overload_Torque", motor, 25)  # 25% torque when overloaded
++
++    def setup_motors(self) -> None:
++        for motor in reversed(self.bus.motors):
++            input(f"Connect the controller board to the '{motor}' motor only and press enter.")
++            self.bus.setup_motor(motor)
++            print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
++
++    def get_observation(self) -> dict[str, Any]:
++        if not self.is_connected:
++            raise DeviceNotConnectedError(f"{self} is not connected.")
++
++        # Read arm position
++        start = time.perf_counter()
++        obs_dict = self.bus.sync_read("Present_Position")
++        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
++        dt_ms = (time.perf_counter() - start) * 1e3
++        logger.debug(f"{self} read state: {dt_ms:.1f}ms")
++
++        # Capture images from cameras
++        for cam_key, cam in self.cameras.items():
++            start = time.perf_counter()
++            obs_dict[cam_key] = cam.async_read()
++            dt_ms = (time.perf_counter() - start) * 1e3
++            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
++
++        return obs_dict
++
++    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
++        """Command arm to move to a target joint configuration.
++
++        The relative action magnitude may be clipped depending on the configuration parameter
++        `max_relative_target`. In this case, the action sent differs from original action.
++        Thus, this function always returns the action actually sent.
++
++        Raises:
++            RobotDeviceNotConnectedError: if robot is not connected.
++
++        Returns:
++            the action sent to the motors, potentially clipped.
++        """
++        if not self.is_connected:
++            raise DeviceNotConnectedError(f"{self} is not connected.")
++
++        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
++
++        # Cap goal position when too far away from present position.
++        # /!\ Slower fps expected due to reading from the follower.
++        if self.config.max_relative_target is not None:
++            present_pos = self.bus.sync_read("Present_Position")
++            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
++            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
++
++        # Send goal position to the arm
++        self.bus.sync_write("Goal_Position", goal_pos)
++        return {f"{motor}.pos": val for motor, val in goal_pos.items()}
++
++    def disconnect(self):
++        if not self.is_connected:
++            raise DeviceNotConnectedError(f"{self} is not connected.")
++
++        self.bus.disconnect(self.config.disable_torque_on_disconnect)
++        for cam in self.cameras.values():
++            cam.disconnect()
++
++        logger.info(f"{self} disconnected.")
+--- a/robots/so101_follower/__init__.py
++++ b/robots/so101_follower/__init__.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from .config_so101_follower import SO101FollowerConfig
++from .so101_follower import SO101Follower
+--- a/robots/so101_follower/config_so101_follower.py
++++ b/robots/so101_follower/config_so101_follower.py
+@@ -0,0 +1,41 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass, field
++
++from lerobot.cameras import CameraConfig
++
++from ..config import RobotConfig
++
++
++@RobotConfig.register_subclass("so101_follower")
++@dataclass
++class SO101FollowerConfig(RobotConfig):
++    # Port to connect to the arm
++    port: str
++
++    disable_torque_on_disconnect: bool = True
++
++    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
++    # Set this to a positive scalar to have the same value for all motors, or a dictionary that maps motor
++    # names to the max_relative_target value for that motor.
++    max_relative_target: float | dict[str, float] | None = None
++
++    # cameras
++    cameras: dict[str, CameraConfig] = field(default_factory=dict)
++
++    # Set to `True` for backward compatibility with previous policies/dataset
++    use_degrees: bool = False
+--- a/robots/so101_follower/so101_follower.py
++++ b/robots/so101_follower/so101_follower.py
+@@ -0,0 +1,230 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import logging
++import time
++from functools import cached_property
++from typing import Any
++
++from lerobot.cameras.utils import make_cameras_from_configs
++from lerobot.motors import Motor, MotorCalibration, MotorNormMode
++from lerobot.motors.feetech import (
++    FeetechMotorsBus,
++    OperatingMode,
++)
++from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
++
++from ..robot import Robot
++from ..utils import ensure_safe_goal_position
++from .config_so101_follower import SO101FollowerConfig
++
++logger = logging.getLogger(__name__)
++
++
++class SO101Follower(Robot):
++    """
++    SO-101 Follower Arm designed by TheRobotStudio and Hugging Face.
++    """
++
++    config_class = SO101FollowerConfig
++    name = "so101_follower"
++
++    def __init__(self, config: SO101FollowerConfig):
++        super().__init__(config)
++        self.config = config
++        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
++        self.bus = FeetechMotorsBus(
++            port=self.config.port,
++            motors={
++                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
++                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
++                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
++                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
++                "wrist_roll": Motor(5, "sts3215", norm_mode_body),
++                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
++            },
++            calibration=self.calibration,
++        )
++        self.cameras = make_cameras_from_configs(config.cameras)
++
++    @property
++    def _motors_ft(self) -> dict[str, type]:
++        return {f"{motor}.pos": float for motor in self.bus.motors}
++
++    @property
++    def _cameras_ft(self) -> dict[str, tuple]:
++        return {
++            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
++        }
++
++    @cached_property
++    def observation_features(self) -> dict[str, type | tuple]:
++        return {**self._motors_ft, **self._cameras_ft}
++
++    @cached_property
++    def action_features(self) -> dict[str, type]:
++        return self._motors_ft
++
++    @property
++    def is_connected(self) -> bool:
++        return self.bus.is_connected and all(cam.is_connected for cam in self.cameras.values())
++
++    def connect(self, calibrate: bool = True) -> None:
++        """
++        We assume that at connection time, arm is in a rest position,
++        and torque can be safely disabled to run calibration.
++        """
++        if self.is_connected:
++            raise DeviceAlreadyConnectedError(f"{self} already connected")
++
++        self.bus.connect()
++        if not self.is_calibrated and calibrate:
++            logger.info(
++                "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
++            )
++            self.calibrate()
++
++        for cam in self.cameras.values():
++            cam.connect()
++
++        self.configure()
++        logger.info(f"{self} connected.")
++
++    @property
++    def is_calibrated(self) -> bool:
++        return self.bus.is_calibrated
++
++    def calibrate(self) -> None:
++        if self.calibration:
++            # self.calibration is not empty here
++            user_input = input(
++                f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "
++            )
++            if user_input.strip().lower() != "c":
++                logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
++                self.bus.write_calibration(self.calibration)
++                return
++
++        logger.info(f"\nRunning calibration of {self}")
++        self.bus.disable_torque()
++        for motor in self.bus.motors:
++            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++
++        input(f"Move {self} to the middle of its range of motion and press ENTER....")
++        homing_offsets = self.bus.set_half_turn_homings()
++
++        print(
++            "Move all joints sequentially through their entire ranges "
++            "of motion.\nRecording positions. Press ENTER to stop..."
++        )
++        range_mins, range_maxes = self.bus.record_ranges_of_motion()
++
++        self.calibration = {}
++        for motor, m in self.bus.motors.items():
++            self.calibration[motor] = MotorCalibration(
++                id=m.id,
++                drive_mode=0,
++                homing_offset=homing_offsets[motor],
++                range_min=range_mins[motor],
++                range_max=range_maxes[motor],
++            )
++
++        self.bus.write_calibration(self.calibration)
++        self._save_calibration()
++        print("Calibration saved to", self.calibration_fpath)
++
++    def configure(self) -> None:
++        with self.bus.torque_disabled():
++            self.bus.configure_motors()
++            for motor in self.bus.motors:
++                self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++                # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
++                self.bus.write("P_Coefficient", motor, 16)
++                # Set I_Coefficient and D_Coefficient to default value 0 and 32
++                self.bus.write("I_Coefficient", motor, 0)
++                self.bus.write("D_Coefficient", motor, 32)
++
++                if motor == "gripper":
++                    self.bus.write(
++                        "Max_Torque_Limit", motor, 500
++                    )  # 50% of the max torque limit to avoid burnout
++                    self.bus.write("Protection_Current", motor, 250)  # 50% of max current to avoid burnout
++                    self.bus.write("Overload_Torque", motor, 25)  # 25% torque when overloaded
++
++    def setup_motors(self) -> None:
++        for motor in reversed(self.bus.motors):
++            input(f"Connect the controller board to the '{motor}' motor only and press enter.")
++            self.bus.setup_motor(motor)
++            print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
++
++    def get_observation(self) -> dict[str, Any]:
++        if not self.is_connected:
++            raise DeviceNotConnectedError(f"{self} is not connected.")
++
++        # Read arm position
++        start = time.perf_counter()
++        obs_dict = self.bus.sync_read("Present_Position")
++        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
++        dt_ms = (time.perf_counter() - start) * 1e3
++        logger.debug(f"{self} read state: {dt_ms:.1f}ms")
++
++        # Capture images from cameras
++        for cam_key, cam in self.cameras.items():
++            start = time.perf_counter()
++            obs_dict[cam_key] = cam.async_read()
++            dt_ms = (time.perf_counter() - start) * 1e3
++            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
++
++        return obs_dict
++
++    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
++        """Command arm to move to a target joint configuration.
++
++        The relative action magnitude may be clipped depending on the configuration parameter
++        `max_relative_target`. In this case, the action sent differs from original action.
++        Thus, this function always returns the action actually sent.
++
++        Raises:
++            RobotDeviceNotConnectedError: if robot is not connected.
++
++        Returns:
++            the action sent to the motors, potentially clipped.
++        """
++        if not self.is_connected:
++            raise DeviceNotConnectedError(f"{self} is not connected.")
++
++        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
++
++        # Cap goal position when too far away from present position.
++        # /!\ Slower fps expected due to reading from the follower.
++        if self.config.max_relative_target is not None:
++            present_pos = self.bus.sync_read("Present_Position")
++            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
++            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
++
++        # Send goal position to the arm
++        self.bus.sync_write("Goal_Position", goal_pos)
++        return {f"{motor}.pos": val for motor, val in goal_pos.items()}
++
++    def disconnect(self):
++        if not self.is_connected:
++            raise DeviceNotConnectedError(f"{self} is not connected.")
++
++        self.bus.disconnect(self.config.disable_torque_on_disconnect)
++        for cam in self.cameras.values():
++            cam.disconnect()
++
++        logger.info(f"{self} disconnected.")
+--- a/robots/bi_so100_follower/__init__.py
++++ b/robots/bi_so100_follower/__init__.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from .bi_so100_follower import BiSO100Follower
++from .config_bi_so100_follower import BiSO100FollowerConfig
+--- a/robots/bi_so100_follower/bi_so100_follower.py
++++ b/robots/bi_so100_follower/bi_so100_follower.py
+@@ -0,0 +1,163 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import logging
++import time
++from functools import cached_property
++from typing import Any
++
++from lerobot.cameras.utils import make_cameras_from_configs
++from lerobot.robots.so100_follower import SO100Follower
++from lerobot.robots.so100_follower.config_so100_follower import SO100FollowerConfig
++
++from ..robot import Robot
++from .config_bi_so100_follower import BiSO100FollowerConfig
++
++logger = logging.getLogger(__name__)
++
++
++class BiSO100Follower(Robot):
++    """
++    [Bimanual SO-100 Follower Arms](https://github.com/TheRobotStudio/SO-ARM100) designed by TheRobotStudio
++    This bimanual robot can also be easily adapted to use SO-101 follower arms, just replace the SO100Follower class with SO101Follower and SO100FollowerConfig with SO101FollowerConfig.
++    """
++
++    config_class = BiSO100FollowerConfig
++    name = "bi_so100_follower"
++
++    def __init__(self, config: BiSO100FollowerConfig):
++        super().__init__(config)
++        self.config = config
++
++        left_arm_config = SO100FollowerConfig(
++            id=f"{config.id}_left" if config.id else None,
++            calibration_dir=config.calibration_dir,
++            port=config.left_arm_port,
++            disable_torque_on_disconnect=config.left_arm_disable_torque_on_disconnect,
++            max_relative_target=config.left_arm_max_relative_target,
++            use_degrees=config.left_arm_use_degrees,
++            cameras={},
++        )
++
++        right_arm_config = SO100FollowerConfig(
++            id=f"{config.id}_right" if config.id else None,
++            calibration_dir=config.calibration_dir,
++            port=config.right_arm_port,
++            disable_torque_on_disconnect=config.right_arm_disable_torque_on_disconnect,
++            max_relative_target=config.right_arm_max_relative_target,
++            use_degrees=config.right_arm_use_degrees,
++            cameras={},
++        )
++
++        self.left_arm = SO100Follower(left_arm_config)
++        self.right_arm = SO100Follower(right_arm_config)
++        self.cameras = make_cameras_from_configs(config.cameras)
++
++    @property
++    def _motors_ft(self) -> dict[str, type]:
++        return {f"left_{motor}.pos": float for motor in self.left_arm.bus.motors} | {
++            f"right_{motor}.pos": float for motor in self.right_arm.bus.motors
++        }
++
++    @property
++    def _cameras_ft(self) -> dict[str, tuple]:
++        return {
++            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
++        }
++
++    @cached_property
++    def observation_features(self) -> dict[str, type | tuple]:
++        return {**self._motors_ft, **self._cameras_ft}
++
++    @cached_property
++    def action_features(self) -> dict[str, type]:
++        return self._motors_ft
++
++    @property
++    def is_connected(self) -> bool:
++        return (
++            self.left_arm.bus.is_connected
++            and self.right_arm.bus.is_connected
++            and all(cam.is_connected for cam in self.cameras.values())
++        )
++
++    def connect(self, calibrate: bool = True) -> None:
++        self.left_arm.connect(calibrate)
++        self.right_arm.connect(calibrate)
++
++        for cam in self.cameras.values():
++            cam.connect()
++
++    @property
++    def is_calibrated(self) -> bool:
++        return self.left_arm.is_calibrated and self.right_arm.is_calibrated
++
++    def calibrate(self) -> None:
++        self.left_arm.calibrate()
++        self.right_arm.calibrate()
++
++    def configure(self) -> None:
++        self.left_arm.configure()
++        self.right_arm.configure()
++
++    def setup_motors(self) -> None:
++        self.left_arm.setup_motors()
++        self.right_arm.setup_motors()
++
++    def get_observation(self) -> dict[str, Any]:
++        obs_dict = {}
++
++        # Add "left_" prefix
++        left_obs = self.left_arm.get_observation()
++        obs_dict.update({f"left_{key}": value for key, value in left_obs.items()})
++
++        # Add "right_" prefix
++        right_obs = self.right_arm.get_observation()
++        obs_dict.update({f"right_{key}": value for key, value in right_obs.items()})
++
++        for cam_key, cam in self.cameras.items():
++            start = time.perf_counter()
++            obs_dict[cam_key] = cam.async_read()
++            dt_ms = (time.perf_counter() - start) * 1e3
++            logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
++
++        return obs_dict
++
++    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
++        # Remove "left_" prefix
++        left_action = {
++            key.removeprefix("left_"): value for key, value in action.items() if key.startswith("left_")
++        }
++        # Remove "right_" prefix
++        right_action = {
++            key.removeprefix("right_"): value for key, value in action.items() if key.startswith("right_")
++        }
++
++        send_action_left = self.left_arm.send_action(left_action)
++        send_action_right = self.right_arm.send_action(right_action)
++
++        # Add prefixes back
++        prefixed_send_action_left = {f"left_{key}": value for key, value in send_action_left.items()}
++        prefixed_send_action_right = {f"right_{key}": value for key, value in send_action_right.items()}
++
++        return {**prefixed_send_action_left, **prefixed_send_action_right}
++
++    def disconnect(self):
++        self.left_arm.disconnect()
++        self.right_arm.disconnect()
++
++        for cam in self.cameras.values():
++            cam.disconnect()
+--- a/robots/bi_so100_follower/config_bi_so100_follower.py
++++ b/robots/bi_so100_follower/config_bi_so100_follower.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass, field
++
++from lerobot.cameras import CameraConfig
++
++from ..config import RobotConfig
++
++
++@RobotConfig.register_subclass("bi_so100_follower")
++@dataclass
++class BiSO100FollowerConfig(RobotConfig):
++    left_arm_port: str
++    right_arm_port: str
++
++    # Optional
++    left_arm_disable_torque_on_disconnect: bool = True
++    left_arm_max_relative_target: float | dict[str, float] | None = None
++    left_arm_use_degrees: bool = False
++    right_arm_disable_torque_on_disconnect: bool = True
++    right_arm_max_relative_target: float | dict[str, float] | None = None
++    right_arm_use_degrees: bool = False
++
++    # cameras (shared between both arms)
++    cameras: dict[str, CameraConfig] = field(default_factory=dict)
+--- a/teleoperators/so100_leader/__init__.py
++++ b/teleoperators/so100_leader/__init__.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from .config_so100_leader import SO100LeaderConfig
++from .so100_leader import SO100Leader
+--- a/teleoperators/so100_leader/config_so100_leader.py
++++ b/teleoperators/so100_leader/config_so100_leader.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python
++
++# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass
++
++from ..config import TeleoperatorConfig
++
++
++@TeleoperatorConfig.register_subclass("so100_leader")
++@dataclass
++class SO100LeaderConfig(TeleoperatorConfig):
++    # Port to connect to the arm
++    port: str
+--- a/teleoperators/so100_leader/so100_leader.py
++++ b/teleoperators/so100_leader/so100_leader.py
+@@ -0,0 +1,159 @@
++#!/usr/bin/env python
++
++# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import logging
++import time
++
++from lerobot.motors import Motor, MotorCalibration, MotorNormMode
++from lerobot.motors.feetech import (
++    FeetechMotorsBus,
++    OperatingMode,
++)
++from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
++
++from ..teleoperator import Teleoperator
++from .config_so100_leader import SO100LeaderConfig
++
++logger = logging.getLogger(__name__)
++
++
++class SO100Leader(Teleoperator):
++    """
++    [SO-100 Leader Arm](https://github.com/TheRobotStudio/SO-ARM100) designed by TheRobotStudio
++    """
++
++    config_class = SO100LeaderConfig
++    name = "so100_leader"
++
++    def __init__(self, config: SO100LeaderConfig):
++        super().__init__(config)
++        self.config = config
++        self.bus = FeetechMotorsBus(
++            port=self.config.port,
++            motors={
++                "shoulder_pan": Motor(1, "sts3215", MotorNormMode.RANGE_M100_100),
++                "shoulder_lift": Motor(2, "sts3215", MotorNormMode.RANGE_M100_100),
++                "elbow_flex": Motor(3, "sts3215", MotorNormMode.RANGE_M100_100),
++                "wrist_flex": Motor(4, "sts3215", MotorNormMode.RANGE_M100_100),
++                "wrist_roll": Motor(5, "sts3215", MotorNormMode.RANGE_M100_100),
++                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
++            },
++            calibration=self.calibration,
++        )
++
++    @property
++    def action_features(self) -> dict[str, type]:
++        return {f"{motor}.pos": float for motor in self.bus.motors}
++
++    @property
++    def feedback_features(self) -> dict[str, type]:
++        return {}
++
++    @property
++    def is_connected(self) -> bool:
++        return self.bus.is_connected
++
++    def connect(self, calibrate: bool = True) -> None:
++        if self.is_connected:
++            raise DeviceAlreadyConnectedError(f"{self} already connected")
++
++        self.bus.connect()
++        if not self.is_calibrated and calibrate:
++            logger.info(
++                "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
++            )
++            self.calibrate()
++
++        self.configure()
++        logger.info(f"{self} connected.")
++
++    @property
++    def is_calibrated(self) -> bool:
++        return self.bus.is_calibrated
++
++    def calibrate(self) -> None:
++        if self.calibration:
++            # Calibration file exists, ask user whether to use it or run new calibration
++            user_input = input(
++                f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "
++            )
++            if user_input.strip().lower() != "c":
++                logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
++                self.bus.write_calibration(self.calibration)
++                return
++
++        logger.info(f"\nRunning calibration of {self}")
++        self.bus.disable_torque()
++        for motor in self.bus.motors:
++            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++
++        input(f"Move {self} to the middle of its range of motion and press ENTER....")
++        homing_offsets = self.bus.set_half_turn_homings()
++
++        full_turn_motor = "wrist_roll"
++        unknown_range_motors = [motor for motor in self.bus.motors if motor != full_turn_motor]
++        print(
++            f"Move all joints except '{full_turn_motor}' sequentially through their "
++            "entire ranges of motion.\nRecording positions. Press ENTER to stop..."
++        )
++        range_mins, range_maxes = self.bus.record_ranges_of_motion(unknown_range_motors)
++        range_mins[full_turn_motor] = 0
++        range_maxes[full_turn_motor] = 4095
++
++        self.calibration = {}
++        for motor, m in self.bus.motors.items():
++            self.calibration[motor] = MotorCalibration(
++                id=m.id,
++                drive_mode=0,
++                homing_offset=homing_offsets[motor],
++                range_min=range_mins[motor],
++                range_max=range_maxes[motor],
++            )
++
++        self.bus.write_calibration(self.calibration)
++        self._save_calibration()
++        print(f"Calibration saved to {self.calibration_fpath}")
++
++    def configure(self) -> None:
++        self.bus.disable_torque()
++        self.bus.configure_motors()
++        for motor in self.bus.motors:
++            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++
++    def setup_motors(self) -> None:
++        for motor in reversed(self.bus.motors):
++            input(f"Connect the controller board to the '{motor}' motor only and press enter.")
++            self.bus.setup_motor(motor)
++            print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
++
++    def get_action(self) -> dict[str, float]:
++        start = time.perf_counter()
++        action = self.bus.sync_read("Present_Position")
++        action = {f"{motor}.pos": val for motor, val in action.items()}
++        dt_ms = (time.perf_counter() - start) * 1e3
++        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
++        return action
++
++    def send_feedback(self, feedback: dict[str, float]) -> None:
++        # TODO(rcadene, aliberts): Implement force feedback
++        raise NotImplementedError
++
++    def disconnect(self) -> None:
++        if not self.is_connected:
++            DeviceNotConnectedError(f"{self} is not connected.")
++
++        self.bus.disconnect()
++        logger.info(f"{self} disconnected.")
+--- a/teleoperators/so101_leader/__init__.py
++++ b/teleoperators/so101_leader/__init__.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from .config_so101_leader import SO101LeaderConfig
++from .so101_leader import SO101Leader
+--- a/teleoperators/so101_leader/config_so101_leader.py
++++ b/teleoperators/so101_leader/config_so101_leader.py
+@@ -0,0 +1,28 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass
++
++from ..config import TeleoperatorConfig
++
++
++@TeleoperatorConfig.register_subclass("so101_leader")
++@dataclass
++class SO101LeaderConfig(TeleoperatorConfig):
++    # Port to connect to the arm
++    port: str
++
++    use_degrees: bool = False
+--- a/teleoperators/so101_leader/so101_leader.py
++++ b/teleoperators/so101_leader/so101_leader.py
+@@ -0,0 +1,156 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import logging
++import time
++
++from lerobot.motors import Motor, MotorCalibration, MotorNormMode
++from lerobot.motors.feetech import (
++    FeetechMotorsBus,
++    OperatingMode,
++)
++from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
++
++from ..teleoperator import Teleoperator
++from .config_so101_leader import SO101LeaderConfig
++
++logger = logging.getLogger(__name__)
++
++
++class SO101Leader(Teleoperator):
++    """
++    SO-101 Leader Arm designed by TheRobotStudio and Hugging Face.
++    """
++
++    config_class = SO101LeaderConfig
++    name = "so101_leader"
++
++    def __init__(self, config: SO101LeaderConfig):
++        super().__init__(config)
++        self.config = config
++        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
++        self.bus = FeetechMotorsBus(
++            port=self.config.port,
++            motors={
++                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
++                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
++                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
++                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
++                "wrist_roll": Motor(5, "sts3215", norm_mode_body),
++                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
++            },
++            calibration=self.calibration,
++        )
++
++    @property
++    def action_features(self) -> dict[str, type]:
++        return {f"{motor}.pos": float for motor in self.bus.motors}
++
++    @property
++    def feedback_features(self) -> dict[str, type]:
++        return {}
++
++    @property
++    def is_connected(self) -> bool:
++        return self.bus.is_connected
++
++    def connect(self, calibrate: bool = True) -> None:
++        if self.is_connected:
++            raise DeviceAlreadyConnectedError(f"{self} already connected")
++
++        self.bus.connect()
++        if not self.is_calibrated and calibrate:
++            logger.info(
++                "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
++            )
++            self.calibrate()
++
++        self.configure()
++        logger.info(f"{self} connected.")
++
++    @property
++    def is_calibrated(self) -> bool:
++        return self.bus.is_calibrated
++
++    def calibrate(self) -> None:
++        if self.calibration:
++            # Calibration file exists, ask user whether to use it or run new calibration
++            user_input = input(
++                f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "
++            )
++            if user_input.strip().lower() != "c":
++                logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
++                self.bus.write_calibration(self.calibration)
++                return
++
++        logger.info(f"\nRunning calibration of {self}")
++        self.bus.disable_torque()
++        for motor in self.bus.motors:
++            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++
++        input(f"Move {self} to the middle of its range of motion and press ENTER....")
++        homing_offsets = self.bus.set_half_turn_homings()
++
++        print(
++            "Move all joints sequentially through their entire ranges "
++            "of motion.\nRecording positions. Press ENTER to stop..."
++        )
++        range_mins, range_maxes = self.bus.record_ranges_of_motion()
++
++        self.calibration = {}
++        for motor, m in self.bus.motors.items():
++            self.calibration[motor] = MotorCalibration(
++                id=m.id,
++                drive_mode=0,
++                homing_offset=homing_offsets[motor],
++                range_min=range_mins[motor],
++                range_max=range_maxes[motor],
++            )
++
++        self.bus.write_calibration(self.calibration)
++        self._save_calibration()
++        print(f"Calibration saved to {self.calibration_fpath}")
++
++    def configure(self) -> None:
++        self.bus.disable_torque()
++        self.bus.configure_motors()
++        for motor in self.bus.motors:
++            self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
++
++    def setup_motors(self) -> None:
++        for motor in reversed(self.bus.motors):
++            input(f"Connect the controller board to the '{motor}' motor only and press enter.")
++            self.bus.setup_motor(motor)
++            print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
++
++    def get_action(self) -> dict[str, float]:
++        start = time.perf_counter()
++        action = self.bus.sync_read("Present_Position")
++        action = {f"{motor}.pos": val for motor, val in action.items()}
++        dt_ms = (time.perf_counter() - start) * 1e3
++        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
++        return action
++
++    def send_feedback(self, feedback: dict[str, float]) -> None:
++        # TODO(rcadene, aliberts): Implement force feedback
++        raise NotImplementedError
++
++    def disconnect(self) -> None:
++        if not self.is_connected:
++            DeviceNotConnectedError(f"{self} is not connected.")
++
++        self.bus.disconnect()
++        logger.info(f"{self} disconnected.")
+--- a/teleoperators/bi_so100_leader/__init__.py
++++ b/teleoperators/bi_so100_leader/__init__.py
+@@ -0,0 +1,18 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from .bi_so100_leader import BiSO100Leader
++from .config_bi_so100_leader import BiSO100LeaderConfig
+--- a/teleoperators/bi_so100_leader/bi_so100_leader.py
++++ b/teleoperators/bi_so100_leader/bi_so100_leader.py
+@@ -0,0 +1,121 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import logging
++from functools import cached_property
++
++from lerobot.teleoperators.so100_leader.config_so100_leader import SO100LeaderConfig
++from lerobot.teleoperators.so100_leader.so100_leader import SO100Leader
++
++from ..teleoperator import Teleoperator
++from .config_bi_so100_leader import BiSO100LeaderConfig
++
++logger = logging.getLogger(__name__)
++
++
++class BiSO100Leader(Teleoperator):
++    """
++    [Bimanual SO-100 Leader Arms](https://github.com/TheRobotStudio/SO-ARM100) designed by TheRobotStudio
++    This bimanual leader arm can also be easily adapted to use SO-101 leader arms, just replace the SO100Leader class with SO101Leader and SO100LeaderConfig with SO101LeaderConfig.
++    """
++
++    config_class = BiSO100LeaderConfig
++    name = "bi_so100_leader"
++
++    def __init__(self, config: BiSO100LeaderConfig):
++        super().__init__(config)
++        self.config = config
++
++        left_arm_config = SO100LeaderConfig(
++            id=f"{config.id}_left" if config.id else None,
++            calibration_dir=config.calibration_dir,
++            port=config.left_arm_port,
++        )
++
++        right_arm_config = SO100LeaderConfig(
++            id=f"{config.id}_right" if config.id else None,
++            calibration_dir=config.calibration_dir,
++            port=config.right_arm_port,
++        )
++
++        self.left_arm = SO100Leader(left_arm_config)
++        self.right_arm = SO100Leader(right_arm_config)
++
++    @cached_property
++    def action_features(self) -> dict[str, type]:
++        return {f"left_{motor}.pos": float for motor in self.left_arm.bus.motors} | {
++            f"right_{motor}.pos": float for motor in self.right_arm.bus.motors
++        }
++
++    @cached_property
++    def feedback_features(self) -> dict[str, type]:
++        return {}
++
++    @property
++    def is_connected(self) -> bool:
++        return self.left_arm.is_connected and self.right_arm.is_connected
++
++    def connect(self, calibrate: bool = True) -> None:
++        self.left_arm.connect(calibrate)
++        self.right_arm.connect(calibrate)
++
++    @property
++    def is_calibrated(self) -> bool:
++        return self.left_arm.is_calibrated and self.right_arm.is_calibrated
++
++    def calibrate(self) -> None:
++        self.left_arm.calibrate()
++        self.right_arm.calibrate()
++
++    def configure(self) -> None:
++        self.left_arm.configure()
++        self.right_arm.configure()
++
++    def setup_motors(self) -> None:
++        self.left_arm.setup_motors()
++        self.right_arm.setup_motors()
++
++    def get_action(self) -> dict[str, float]:
++        action_dict = {}
++
++        # Add "left_" prefix
++        left_action = self.left_arm.get_action()
++        action_dict.update({f"left_{key}": value for key, value in left_action.items()})
++
++        # Add "right_" prefix
++        right_action = self.right_arm.get_action()
++        action_dict.update({f"right_{key}": value for key, value in right_action.items()})
++
++        return action_dict
++
++    def send_feedback(self, feedback: dict[str, float]) -> None:
++        # Remove "left_" prefix
++        left_feedback = {
++            key.removeprefix("left_"): value for key, value in feedback.items() if key.startswith("left_")
++        }
++        # Remove "right_" prefix
++        right_feedback = {
++            key.removeprefix("right_"): value for key, value in feedback.items() if key.startswith("right_")
++        }
++
++        if left_feedback:
++            self.left_arm.send_feedback(left_feedback)
++        if right_feedback:
++            self.right_arm.send_feedback(right_feedback)
++
++    def disconnect(self) -> None:
++        self.left_arm.disconnect()
++        self.right_arm.disconnect()
+--- a/teleoperators/bi_so100_leader/config_bi_so100_leader.py
++++ b/teleoperators/bi_so100_leader/config_bi_so100_leader.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass
++
++from ..config import TeleoperatorConfig
++
++
++@TeleoperatorConfig.register_subclass("bi_so100_leader")
++@dataclass
++class BiSO100LeaderConfig(TeleoperatorConfig):
++    left_arm_port: str
++    right_arm_port: str
+--- a/processor/joint_observations_processor.py
++++ b/processor/joint_observations_processor.py
+@@ -0,0 +1,211 @@
++#!/usr/bin/env python
++
++# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from dataclasses import dataclass
++from typing import Any
++
++import torch
++
++from lerobot.configs.types import PipelineFeatureType, PolicyFeature
++from lerobot.processor.pipeline import (
++    ObservationProcessorStep,
++    ProcessorStepRegistry,
++)
++from lerobot.robots import Robot
++from lerobot.utils.constants import OBS_STATE
++
++
++@dataclass
++@ProcessorStepRegistry.register("joint_velocity_processor")
++class JointVelocityProcessorStep(ObservationProcessorStep):
++    """
++    Calculates and appends joint velocity information to the observation state.
++
++    This step computes the velocity of each joint by calculating the finite
++    difference between the current and the last observed joint positions. The
++    resulting velocity vector is then concatenated to the original state vector.
++
++    Attributes:
++        dt: The time step (delta time) in seconds between observations, used for
++            calculating velocity.
++        last_joint_positions: Stores the joint positions from the previous step
++                              to enable velocity calculation.
++    """
++
++    dt: float = 0.1
++
++    last_joint_positions: torch.Tensor | None = None
++
++    def observation(self, observation: dict) -> dict:
++        """
++        Computes joint velocities and adds them to the observation state.
++
++        Args:
++            observation: The input observation dictionary, expected to contain
++                         an `observation.state` key with joint positions.
++
++        Returns:
++            A new observation dictionary with the `observation.state` tensor
++            extended to include joint velocities.
++
++        Raises:
++            ValueError: If `observation.state` is not found in the observation.
++        """
++        # Get current joint positions (assuming they're in observation.state)
++        current_positions = observation.get(OBS_STATE)
++        if current_positions is None:
++            raise ValueError(f"{OBS_STATE} is not in observation")
++
++        # Initialize last joint positions if not already set
++        if self.last_joint_positions is None:
++            self.last_joint_positions = current_positions.clone()
++            joint_velocities = torch.zeros_like(current_positions)
++        else:
++            # Compute velocities
++            joint_velocities = (current_positions - self.last_joint_positions) / self.dt
++
++        self.last_joint_positions = current_positions.clone()
++
++        # Extend observation with velocities
++        extended_state = torch.cat([current_positions, joint_velocities], dim=-1)
++
++        # Create new observation dict
++        new_observation = dict(observation)
++        new_observation[OBS_STATE] = extended_state
++
++        return new_observation
++
++    def get_config(self) -> dict[str, Any]:
++        """
++        Returns the configuration of the step for serialization.
++
++        Returns:
++            A dictionary containing the time step `dt`.
++        """
++        return {
++            "dt": self.dt,
++        }
++
++    def reset(self) -> None:
++        """Resets the internal state, clearing the last known joint positions."""
++        self.last_joint_positions = None
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        """
++        Updates the `observation.state` feature to reflect the added velocities.
++
++        This method doubles the size of the first dimension of the `observation.state`
++        shape to account for the concatenation of position and velocity vectors.
++
++        Args:
++            features: The policy features dictionary.
++
++        Returns:
++            The updated policy features dictionary.
++        """
++        if OBS_STATE in features[PipelineFeatureType.OBSERVATION]:
++            original_feature = features[PipelineFeatureType.OBSERVATION][OBS_STATE]
++            # Double the shape to account for positions + velocities
++            new_shape = (original_feature.shape[0] * 2,) + original_feature.shape[1:]
++
++            features[PipelineFeatureType.OBSERVATION][OBS_STATE] = PolicyFeature(
++                type=original_feature.type, shape=new_shape
++            )
++        return features
++
++
++@dataclass
++@ProcessorStepRegistry.register("current_processor")
++class MotorCurrentProcessorStep(ObservationProcessorStep):
++    """
++    Reads motor currents from a robot and appends them to the observation state.
++
++    This step queries the robot's hardware interface to get the present current
++    for each motor and concatenates this information to the existing state vector.
++
++    Attributes:
++        robot: An instance of a `lerobot` Robot class that provides access to
++               the hardware bus.
++    """
++
++    robot: Robot | None = None
++
++    def observation(self, observation: dict) -> dict:
++        """
++        Fetches motor currents and adds them to the observation state.
++
++        Args:
++            observation: The input observation dictionary.
++
++        Returns:
++            A new observation dictionary with the `observation.state` tensor
++            extended to include motor currents.
++
++        Raises:
++            ValueError: If the `robot` attribute has not been set.
++        """
++        # Get current values from robot state
++        if self.robot is None:
++            raise ValueError("Robot is not set")
++
++        present_current_dict = self.robot.bus.sync_read("Present_Current")  # type: ignore[attr-defined]
++        motor_currents = torch.tensor(
++            [present_current_dict[name] for name in self.robot.bus.motors],  # type: ignore[attr-defined]
++            dtype=torch.float32,
++        ).unsqueeze(0)
++
++        current_state = observation.get(OBS_STATE)
++        if current_state is None:
++            return observation
++
++        extended_state = torch.cat([current_state, motor_currents], dim=-1)
++
++        # Create new observation dict
++        new_observation = dict(observation)
++        new_observation[OBS_STATE] = extended_state
++
++        return new_observation
++
++    def transform_features(
++        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
++    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
++        """
++        Updates the `observation.state` feature to reflect the added motor currents.
++
++        This method increases the size of the first dimension of the `observation.state`
++        shape by the number of motors in the robot.
++
++        Args:
++            features: The policy features dictionary.
++
++        Returns:
++            The updated policy features dictionary.
++        """
++        if OBS_STATE in features[PipelineFeatureType.OBSERVATION] and self.robot is not None:
++            original_feature = features[PipelineFeatureType.OBSERVATION][OBS_STATE]
++            # Add motor current dimensions to the original state shape
++            num_motors = 0
++            if hasattr(self.robot, "bus") and hasattr(self.robot.bus, "motors"):  # type: ignore[attr-defined]
++                num_motors = len(self.robot.bus.motors)  # type: ignore[attr-defined]
++
++            if num_motors > 0:
++                new_shape = (original_feature.shape[0] + num_motors,) + original_feature.shape[1:]
++                features[PipelineFeatureType.OBSERVATION][OBS_STATE] = PolicyFeature(
++                    type=original_feature.type, shape=new_shape
++                )
++        return features
+--- a/envs/utils.py	2026-04-16 22:37:05
++++ b/envs/utils.py	2026-04-15 22:36:03
+@@ -29,7 +29,6 @@
+ 
+ from lerobot.configs.types import FeatureType, PolicyFeature
+ from lerobot.envs.configs import EnvConfig
+-from lerobot.processor import RobotObservation
+ from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, OBS_STR
+ from lerobot.utils.utils import get_channel_first_image_shape
+ 
+@@ -97,6 +96,14 @@
+             agent_pos = agent_pos.unsqueeze(0)
+         return_observations[OBS_STATE] = agent_pos
+ 
++    # HACK: Support 'state' key from gym-hil envs
++    if "state" in observations:
++        state = torch.from_numpy(observations["state"]).float()
++        # Handle batch dimension if present
++        if state.dim() == 1:
++            state = state.unsqueeze(0)
++        return_observations[OBS_STATE] = state
++
+     if "robot_state" in observations:
+         return_observations[f"{OBS_STR}.robot_state"] = _convert_nested_dict(observations["robot_state"])
+ 
+@@ -153,8 +160,10 @@
+             )
+ 
+ 
+-def add_envs_task(env: gym.vector.VectorEnv, observation: RobotObservation) -> RobotObservation:
++def add_envs_task(env: gym.vector.VectorEnv, observation: dict[str, Any]) -> dict[str, Any]:
+     """Adds task feature to the observation dict with respect to the first environment attribute."""
++    # DEBUG PRINT
++    # print(f"DEBUG: add_envs_task input observation keys: {list(observation.keys())}")
+     if hasattr(env.envs[0], "task_description"):
+         task_result = env.call("task_description")
+ 
+--- a/rl/gym_manipulator.py	2026-04-16 22:37:05
++++ b/rl/gym_manipulator.py	2026-04-15 22:36:03
+@@ -38,12 +38,13 @@
+     GripperPenaltyProcessorStep,
+     ImageCropResizeProcessorStep,
+     InterventionActionProcessorStep,
++    JointVelocityProcessorStep,
+     MapDeltaActionToRobotActionStep,
+     MapTensorToDeltaActionDictStep,
++    MotorCurrentProcessorStep,
+     Numpy2TorchActionProcessorStep,
+     RewardClassifierProcessorStep,
+     RobotActionToPolicyActionProcessorStep,
+-    RobotObservation,
+     TimeLimitProcessorStep,
+     Torch2NumpyActionProcessorStep,
+     TransitionKey,
+@@ -54,10 +55,10 @@
+ from lerobot.robots import (  # noqa: F401
+     RobotConfig,
+     make_robot_from_config,
+-    so_follower,
++    so100_follower,
+ )
+ from lerobot.robots.robot import Robot
+-from lerobot.robots.so_follower.robot_kinematic_processor import (
++from lerobot.robots.so100_follower.robot_kinematic_processor import (
+     EEBoundsAndSafety,
+     EEReferenceAndDelta,
+     ForwardKinematicsJointsToEEObservation,
+@@ -68,7 +69,7 @@
+     gamepad,  # noqa: F401
+     keyboard,  # noqa: F401
+     make_teleoperator_from_config,
+-    so_leader,  # noqa: F401
++    so101_leader,  # noqa: F401
+ )
+ from lerobot.teleoperators.teleoperator import Teleoperator
+ from lerobot.teleoperators.utils import TeleopEvents
+@@ -76,8 +77,6 @@
+ from lerobot.utils.robot_utils import precise_sleep
+ from lerobot.utils.utils import log_say
+ 
+-from .joint_observations_processor import JointVelocityProcessorStep, MotorCurrentProcessorStep
+-
+ logging.basicConfig(level=logging.INFO)
+ 
+ 
+@@ -164,7 +163,7 @@
+ 
+         self._setup_spaces()
+ 
+-    def _get_observation(self) -> RobotObservation:
++    def _get_observation(self) -> dict[str, Any]:
+         """Get current robot observation including joint positions and camera images."""
+         obs_dict = self.robot.get_observation()
+         raw_joint_joint_position = {f"{name}.pos": obs_dict[f"{name}.pos"] for name in self._joint_names}
+@@ -221,7 +220,7 @@
+ 
+     def reset(
+         self, *, seed: int | None = None, options: dict[str, Any] | None = None
+-    ) -> tuple[RobotObservation, dict[str, Any]]:
++    ) -> tuple[dict[str, Any], dict[str, Any]]:
+         """Reset environment to initial state.
+ 
+         Args:
+@@ -239,7 +238,7 @@
+             reset_follower_position(self.robot, np.array(self.reset_pose))
+             log_say("Reset the environment done.", play_sounds=True)
+ 
+-        precise_sleep(max(self.reset_time_s - (time.perf_counter() - start_time), 0.0))
++        precise_sleep(self.reset_time_s - (time.perf_counter() - start_time))
+ 
+         super().reset(seed=seed, options=options)
+ 
+@@ -250,7 +249,7 @@
+         self._raw_joint_positions = {f"{key}.pos": obs[f"{key}.pos"] for key in self._joint_names}
+         return obs, {TeleopEvents.IS_INTERVENTION: False}
+ 
+-    def step(self, action) -> tuple[RobotObservation, float, bool, bool, dict[str, Any]]:
++    def step(self, action) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+         """Execute one environment step with given action."""
+         joint_targets_dict = {f"{key}.pos": action[i] for i, key in enumerate(self.robot.bus.motors.keys())}
+ 
+@@ -714,7 +713,7 @@
+             transition = env_processor(transition)
+ 
+         # Maintain fps timing
+-        precise_sleep(max(dt - (time.perf_counter() - step_start_time), 0.0))
++        precise_sleep(dt - (time.perf_counter() - step_start_time))
+ 
+     if dataset is not None and cfg.dataset.push_to_hub:
+         logging.info("Pushing dataset to hub")
+@@ -746,7 +745,7 @@
+         )
+         transition = action_processor(transition)
+         env.step(transition[TransitionKey.ACTION])
+-        precise_sleep(max(1 / cfg.env.fps - (time.perf_counter() - start_time), 0.0))
++        precise_sleep(1 / cfg.env.fps - (time.perf_counter() - start_time))
+ 
+ 
+ @parser.wrap()
+--- a/scripts/lerobot_train.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_train.py	2026-04-15 22:36:03
+@@ -17,14 +17,41 @@
+ import logging
+ import time
+ from contextlib import nullcontext
++from pathlib import Path
+ from pprint import pformat
+ from typing import Any
+ 
++import sys
++import gymnasium as gym
+ import torch
+ from accelerate import Accelerator
+ from termcolor import colored
+ from torch.optim import Optimizer
+ 
++_repo_root = Path(__file__).resolve().parents[4]
++_gym_hil_path = _repo_root / "gym-hil"
++if _gym_hil_path.exists():
++    sys.path.insert(0, str(_gym_hil_path))
++
++import gym_hil
++
++# Hack: alias gym_hil as gym_gym_manipulator to satisfy LeRobot's factory
++sys.modules['gym_gym_manipulator'] = gym_hil
++
++# Register the environment with the ID that LeRobot expects (package_name/task)
++# This prevents NameNotFound error when LeRobot constructs the gym_id
++gym.register(
++    id="gym_gym_manipulator/SO100PickCubeBase-v0",
++    entry_point="gym_hil.envs:SO100PickCubeGymEnv",
++    max_episode_steps=400,
++)
++
++gym.register(
++    id="gym_gym_manipulator/SO100GrabPenBase-v0",
++    entry_point="gym_hil.envs:SO100GrabPenGymEnv",
++    max_episode_steps=2000,
++)
++
+ from lerobot.configs import parser
+ from lerobot.configs.train import TrainPipelineConfig
+ from lerobot.datasets.factory import make_dataset
+@@ -148,6 +175,92 @@
+     return train_metrics, output_dict
+ 
+ 
++def get_default_peft_configuration(policy_type):
++    """Build a basic PEFT configuration for the given policy type assuming that we train a policy from a checkpoint."""
++
++    common_projections = "state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out"
++
++    if policy_type == "smolvla":
++        return {
++            "target_modules": rf"(model\.vlm_with_expert\.lm_expert\..*\.(q|v)_proj|model\.({common_projections}))",
++            "modules_to_save": [],
++        }
++    elif policy_type in ("pi0", "pi05"):
++        return {
++            "target_modules": rf"(.*\.gemma_expert\..*\.self_attn.(q|v)_proj|model\.({common_projections}))",
++            "modules_to_save": [],
++        }
++
++    return {"modules_to_save": None}
++
++
++def wrap_policy_in_peft_model(cfg, policy):
++    from peft import PEFT_TYPE_TO_CONFIG_MAPPING, PeftType, get_peft_model
++
++    # Disable all gradients because we'll only train the parameters selected by the PEFT method.
++    # Layers that should receive gradients anyway need to be listed in `modules_to_save`.
++    for p in policy.parameters():
++        p.requires_grad_(False)
++
++    if not cfg.policy.pretrained_path:
++        raise ValueError(
++            "Training from scratch using PEFT. This is unlikely to yield good results. "
++            "Supply a `policy.path` to fine-tune an existing model."
++        )
++
++    if cfg.policy.type == "smolvla" and not cfg.policy.load_vlm_weights:
++        logging.warning(
++            "Training SmolVLA from scratch using PEFT. This is unlikely to yield good results. Set "
++            "`load_vlm_weights=True` to fine-tune the existing policy."
++        )
++
++    peft_config_policy = get_default_peft_configuration(cfg.policy.type)
++    peft_config_cli = dataclasses.asdict(cfg.peft) if cfg.peft else {}
++    peft_config_cli["modules_to_save"] = peft_config_cli["full_training_modules"]  # compatibility with PEFT
++    peft_method_type = PeftType[peft_config_cli["method_type"].upper()]
++    peft_config_cls = PEFT_TYPE_TO_CONFIG_MAPPING[peft_method_type]
++
++    # Handle specific CLI overrides
++    for key in ["target_modules", "modules_to_save", "r"]:
++        if peft_config_cli[key] is not None:
++            peft_config_policy[key] = peft_config_cli[key]
++
++    if "target_modules" not in peft_config_policy:
++        raise ValueError(
++            f"There is no default `target_modules` value for policy {cfg.policy.type}. Please pass it manually."
++        )
++
++    # Init method depends on the used PEFT method, your specific PEFT method
++    # might not be considered here, in that case an error is raised.
++    if peft_config_cli["init_type"] is not None:
++        if peft_method_type == "LORA":
++            peft_config_policy["init_lora_weights"] = peft_config_cli["init_type"]
++        elif peft_method_type == "MISS":
++            peft_config_policy["init_weights"] = peft_config_cli["init_type"]
++        else:
++            raise ValueError(
++                f"Init type {peft_config_cli['init_type']} unknown for PEFT method {peft_method_type}."
++            )
++
++    # PEFT uses this attribute to set adapter_config.base_name_or_path which we use for loading the
++    # correct base model in `make_policy` since in a PEFT loading setting we only get the path to the
++    # adapter, not the base model.
++    if policy.config.pretrained_path:
++        policy.name_or_path = str(policy.config.pretrained_path)
++
++    # Finally wrap the policy in a PEFT model
++    policy = get_peft_model(
++        policy,
++        peft_config_cls(**peft_config_policy),
++    )
++
++    # Make sure that the config is tagged as using PEFT so that the loading code can take the
++    # appropriate steps to use the adapter weights and the PEFT config instead of the full model weights.
++    policy.config.use_peft = True
++
++    return policy
++
++
+ @parser.wrap()
+ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
+     """
+@@ -165,8 +278,6 @@
+         cfg: A `TrainPipelineConfig` object containing all training configurations.
+         accelerator: Optional Accelerator instance. If None, one will be created automatically.
+     """
+-    cfg.validate()
+-
+     # Create Accelerator if not provided
+     # It will automatically detect if running in distributed mode or single-process mode
+     # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
+@@ -175,14 +286,7 @@
+         from accelerate.utils import DistributedDataParallelKwargs
+ 
+         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+-        # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
+-        # Force the device to be CPU when policy.device is set to CPU.
+-        force_cpu = cfg.policy.device == "cpu"
+-        accelerator = Accelerator(
+-            step_scheduler_with_optimizer=False,
+-            kwargs_handlers=[ddp_kwargs],
+-            cpu=force_cpu,
+-        )
++        accelerator = Accelerator(step_scheduler_with_optimizer=False, kwargs_handlers=[ddp_kwargs])
+ 
+     init_logging(accelerator=accelerator)
+ 
+@@ -190,6 +294,8 @@
+     # When using accelerate, only the main process should log to avoid duplicate outputs
+     is_main_process = accelerator.is_main_process
+ 
++    cfg.validate()
++
+     # Only log on main process
+     if is_main_process:
+         logging.info(pformat(cfg.to_dict()))
+@@ -225,8 +331,9 @@
+     # On real-world data, no need to create an environment as evaluations are done outside train.py,
+     # using the eval.py instead, with gym_dora environment and dora-rs.
+     eval_env = None
+-    if cfg.eval_freq > 0 and cfg.env is not None and is_main_process:
+-        logging.info("Creating env")
++    if cfg.eval_freq > 0 and cfg.env is not None:
++        if is_main_process:
++            logging.info("Creating env")
+         eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
+ 
+     if is_main_process:
+@@ -239,9 +346,7 @@
+ 
+     if cfg.peft is not None:
+         logging.info("Using PEFT! Wrapping model.")
+-        # Convert CLI peft config to dict for overrides
+-        peft_cli_overrides = dataclasses.asdict(cfg.peft)
+-        policy = policy.wrap_with_peft(peft_cli_overrides=peft_cli_overrides)
++        policy = wrap_policy_in_peft_model(cfg, policy)
+ 
+     # Wait for all processes to finish policy creation before continuing
+     accelerator.wait_for_everyone()
+@@ -472,7 +577,7 @@
+                         postprocessor=postprocessor,
+                         n_episodes=cfg.eval.n_episodes,
+                         videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
+-                        max_episodes_rendered=4,
++                        max_episodes_rendered=1,
+                         start_seed=cfg.seed,
+                         max_parallel_tasks=cfg.env.max_parallel_tasks,
+                     )
+--- a/scripts/lerobot_record.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_record.py	2026-04-15 22:36:03
+@@ -27,8 +27,6 @@
+     --dataset.num_episodes=2 \
+     --dataset.single_task="Grab the cube" \
+     --display_data=true
+-    # <- Optional: specify video codec (h264, hevc, libsvtav1). Default is libsvtav1. \
+-    # --dataset.vcodec=h264 \
+     # <- Teleop optional if you want to teleoperate to record or in between episodes with a policy \
+     # --teleop.type=so100_leader \
+     # --teleop.port=/dev/tty.usbmodem58760431551 \
+@@ -40,23 +38,21 @@
+ Example recording with bimanual so100:
+ ```shell
+ lerobot-record \
+-  --robot.type=bi_so_follower \
+-  --robot.left_arm_config.port=/dev/tty.usbmodem5A460822851 \
+-  --robot.right_arm_config.port=/dev/tty.usbmodem5A460814411 \
++  --robot.type=bi_so100_follower \
++  --robot.left_arm_port=/dev/tty.usbmodem5A460851411 \
++  --robot.right_arm_port=/dev/tty.usbmodem5A460812391 \
+   --robot.id=bimanual_follower \
+-  --robot.left_arm_config.cameras='{
+-    wrist: {"type": "opencv", "index_or_path": 1, "width": 640, "height": 480, "fps": 30},
+-    top: {"type": "opencv", "index_or_path": 3, "width": 640, "height": 480, "fps": 30},
+-  }' --robot.right_arm_config.cameras='{
+-    wrist: {"type": "opencv", "index_or_path": 2, "width": 640, "height": 480, "fps": 30},
+-    front: {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30},
++  --robot.cameras='{
++    left: {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30},
++    top: {"type": "opencv", "index_or_path": 1, "width": 640, "height": 480, "fps": 30},
++    right: {"type": "opencv", "index_or_path": 2, "width": 640, "height": 480, "fps": 30}
+   }' \
+-  --teleop.type=bi_so_leader \
+-  --teleop.left_arm_config.port=/dev/tty.usbmodem5A460852721 \
+-  --teleop.right_arm_config.port=/dev/tty.usbmodem5A460819811 \
++  --teleop.type=bi_so100_leader \
++  --teleop.left_arm_port=/dev/tty.usbmodem5A460828611 \
++  --teleop.right_arm_port=/dev/tty.usbmodem5A460826981 \
+   --teleop.id=bimanual_leader \
+   --display_data=true \
+-  --dataset.repo_id=${HF_USER}/bimanual-so-handover-cube \
++  --dataset.repo_id=${HF_USER}/bimanual-so100-handover-cube \
+   --dataset.num_episodes=25 \
+   --dataset.single_task="Grab and handover the red cube to the other arm"
+ ```
+@@ -73,9 +69,7 @@
+     CameraConfig,  # noqa: F401
+ )
+ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+-from lerobot.cameras.reachy2_camera.configuration_reachy2_camera import Reachy2CameraConfig  # noqa: F401
+ from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+-from lerobot.cameras.zmq.configuration_zmq import ZMQCameraConfig  # noqa: F401
+ from lerobot.configs import parser
+ from lerobot.configs.policies import PreTrainedConfig
+ from lerobot.datasets.image_writer import safe_stop_image_writer
+@@ -98,26 +92,25 @@
+ from lerobot.robots import (  # noqa: F401
+     Robot,
+     RobotConfig,
+-    bi_so_follower,
++    bi_so100_follower,
+     earthrover_mini_plus,
+     hope_jr,
+     koch_follower,
+     make_robot_from_config,
+     omx_follower,
+-    reachy2,
+-    so_follower,
+-    unitree_g1,
++    so100_follower,
++    so101_follower,
+ )
+ from lerobot.teleoperators import (  # noqa: F401
+     Teleoperator,
+     TeleoperatorConfig,
+-    bi_so_leader,
++    bi_so100_leader,
+     homunculus,
+     koch_leader,
+     make_teleoperator_from_config,
+     omx_leader,
+-    reachy2_teleoperator,
+-    so_leader,
++    so100_leader,
++    so101_leader,
+ )
+ from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
+ from lerobot.utils.constants import ACTION, OBS_STR
+@@ -174,9 +167,6 @@
+     # Number of episodes to record before batch encoding videos
+     # Set to 1 for immediate encoding (default behavior), or higher for batched encoding
+     video_encoding_batch_size: int = 1
+-    # Video codec for encoding videos. Options: 'h264', 'hevc', 'libsvtav1'.
+-    # Use 'h264' for faster encoding on systems where AV1 encoding is CPU-heavy.
+-    vcodec: str = "libsvtav1"
+     # Rename map for the observation to override the image and state keys
+     rename_map: dict[str, str] = field(default_factory=dict)
+ 
+@@ -195,12 +185,6 @@
+     policy: PreTrainedConfig | None = None
+     # Display all cameras on screen
+     display_data: bool = False
+-    # Display data on a remote Rerun server
+-    display_ip: str | None = None
+-    # Port of the remote Rerun server
+-    display_port: int | None = None
+-    # Whether to  display compressed images in Rerun
+-    display_compressed_images: bool = False
+     # Use vocal synthesis to read events.
+     play_sounds: bool = True
+     # Resume recording on an existing dataset.
+@@ -277,7 +261,6 @@
+     control_time_s: int | None = None,
+     single_task: str | None = None,
+     display_data: bool = False,
+-    display_compressed_images: bool = False,
+ ):
+     if dataset is not None and dataset.fps != fps:
+         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
+@@ -292,8 +275,8 @@
+                 if isinstance(
+                     t,
+                     (
+-                        so_leader.SO100Leader
+-                        | so_leader.SO101Leader
++                        so100_leader.SO100Leader
++                        | so101_leader.SO101Leader
+                         | koch_leader.KochLeader
+                         | omx_leader.OmxLeader
+                     ),
+@@ -388,12 +371,10 @@
+             dataset.add_frame(frame)
+ 
+         if display_data:
+-            log_rerun_data(
+-                observation=obs_processed, action=action_values, compress_images=display_compressed_images
+-            )
++            log_rerun_data(observation=obs_processed, action=action_values)
+ 
+         dt_s = time.perf_counter() - start_loop_t
+-        precise_sleep(max(1 / fps - dt_s, 0.0))
++        precise_sleep(1 / fps - dt_s)
+ 
+         timestamp = time.perf_counter() - start_episode_t
+ 
+@@ -403,12 +384,7 @@
+     init_logging()
+     logging.info(pformat(asdict(cfg)))
+     if cfg.display_data:
+-        init_rerun(session_name="recording", ip=cfg.display_ip, port=cfg.display_port)
+-    display_compressed_images = (
+-        True
+-        if (cfg.display_data and cfg.display_ip is not None and cfg.display_port is not None)
+-        else cfg.display_compressed_images
+-    )
++        init_rerun(session_name="recording")
+ 
+     robot = make_robot_from_config(cfg.robot)
+     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+@@ -439,7 +415,6 @@
+                 cfg.dataset.repo_id,
+                 root=cfg.dataset.root,
+                 batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+-                vcodec=cfg.dataset.vcodec,
+             )
+ 
+             if hasattr(robot, "cameras") and len(robot.cameras) > 0:
+@@ -461,7 +436,6 @@
+                 image_writer_processes=cfg.dataset.num_image_writer_processes,
+                 image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * len(robot.cameras),
+                 batch_encoding_size=cfg.dataset.video_encoding_batch_size,
+-                vcodec=cfg.dataset.vcodec,
+             )
+ 
+         # Load pretrained policy
+@@ -504,7 +478,6 @@
+                     control_time_s=cfg.dataset.episode_time_s,
+                     single_task=cfg.dataset.single_task,
+                     display_data=cfg.display_data,
+-                    display_compressed_images=display_compressed_images,
+                 )
+ 
+                 # Execute a few seconds without recording to give time to manually reset the environment
+@@ -513,11 +486,6 @@
+                     (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                 ):
+                     log_say("Reset the environment", cfg.play_sounds)
+-
+-                    # reset g1 robot
+-                    if robot.name == "unitree_g1":
+-                        robot.reset()
+-
+                     record_loop(
+                         robot=robot,
+                         events=events,
+--- a/scripts/lerobot_teleoperate.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_teleoperate.py	2026-04-15 22:36:03
+@@ -33,18 +33,18 @@
+ 
+ ```shell
+ lerobot-teleoperate \
+-  --robot.type=bi_so_follower \
+-  --robot.left_arm_config.port=/dev/tty.usbmodem5A460822851 \
+-  --robot.right_arm_config.port=/dev/tty.usbmodem5A460814411 \
++  --robot.type=bi_so100_follower \
++  --robot.left_arm_port=/dev/tty.usbmodem5A460851411 \
++  --robot.right_arm_port=/dev/tty.usbmodem5A460812391 \
+   --robot.id=bimanual_follower \
+-  --robot.left_arm_config.cameras='{
+-    wrist: {"type": "opencv", "index_or_path": 1, "width": 640, "height": 480, "fps": 30},
+-  }' --robot.right_arm_config.cameras='{
+-    wrist: {"type": "opencv", "index_or_path": 2, "width": 640, "height": 480, "fps": 30},
++  --robot.cameras='{
++    left: {"type": "opencv", "index_or_path": 0, "width": 1920, "height": 1080, "fps": 30},
++    top: {"type": "opencv", "index_or_path": 1, "width": 1920, "height": 1080, "fps": 30},
++    right: {"type": "opencv", "index_or_path": 2, "width": 1920, "height": 1080, "fps": 30}
+   }' \
+-  --teleop.type=bi_so_leader \
+-  --teleop.left_arm_config.port=/dev/tty.usbmodem5A460852721 \
+-  --teleop.right_arm_config.port=/dev/tty.usbmodem5A460819811 \
++  --teleop.type=bi_so100_leader \
++  --teleop.left_arm_port=/dev/tty.usbmodem5A460828611 \
++  --teleop.right_arm_port=/dev/tty.usbmodem5A460826981 \
+   --teleop.id=bimanual_leader \
+   --display_data=true
+ ```
+@@ -70,27 +70,27 @@
+ from lerobot.robots import (  # noqa: F401
+     Robot,
+     RobotConfig,
+-    bi_so_follower,
++    bi_so100_follower,
+     earthrover_mini_plus,
+     hope_jr,
+     koch_follower,
+     make_robot_from_config,
+     omx_follower,
+-    reachy2,
+-    so_follower,
++    so100_follower,
++    so101_follower,
+ )
+ from lerobot.teleoperators import (  # noqa: F401
+     Teleoperator,
+     TeleoperatorConfig,
+-    bi_so_leader,
++    bi_so100_leader,
+     gamepad,
+     homunculus,
+     keyboard,
+     koch_leader,
+     make_teleoperator_from_config,
+     omx_leader,
+-    reachy2_teleoperator,
+-    so_leader,
++    so100_leader,
++    so101_leader,
+ )
+ from lerobot.utils.import_utils import register_third_party_plugins
+ from lerobot.utils.robot_utils import precise_sleep
+@@ -108,12 +108,6 @@
+     teleop_time_s: float | None = None
+     # Display all cameras on screen
+     display_data: bool = False
+-    # Display data on a remote Rerun server
+-    display_ip: str | None = None
+-    # Port of the remote Rerun server
+-    display_port: int | None = None
+-    # Whether to  display compressed images in Rerun
+-    display_compressed_images: bool = False
+ 
+ 
+ def teleop_loop(
+@@ -125,7 +119,6 @@
+     robot_observation_processor: RobotProcessorPipeline[RobotObservation, RobotObservation],
+     display_data: bool = False,
+     duration: float | None = None,
+-    display_compressed_images: bool = False,
+ ):
+     """
+     This function continuously reads actions from a teleoperation device, processes them through optional
+@@ -137,7 +130,6 @@
+         robot: The robot instance being controlled.
+         fps: The target frequency for the control loop in frames per second.
+         display_data: If True, fetches robot observations and displays them in the console and Rerun.
+-        display_compressed_images: If True, compresses images before sending them to Rerun for display.
+         duration: The maximum duration of the teleoperation loop in seconds. If None, the loop runs indefinitely.
+         teleop_action_processor: An optional pipeline to process raw actions from the teleoperator.
+         robot_action_processor: An optional pipeline to process actions before they are sent to the robot.
+@@ -165,7 +157,7 @@
+         # Process action for robot through pipeline
+         robot_action_to_send = robot_action_processor((teleop_action, obs))
+ 
+-        # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
++        # Send processed action to robot (robot_action_processor.to_output should return dict[str, Any])
+         _ = robot.send_action(robot_action_to_send)
+ 
+         if display_data:
+@@ -175,7 +167,6 @@
+             log_rerun_data(
+                 observation=obs_transition,
+                 action=teleop_action,
+-                compress_images=display_compressed_images,
+             )
+ 
+             print("
+" + "-" * (display_len + 10))
+@@ -186,7 +177,7 @@
+             move_cursor_up(len(robot_action_to_send) + 3)
+ 
+         dt_s = time.perf_counter() - loop_start
+-        precise_sleep(max(1 / fps - dt_s, 0.0))
++        precise_sleep(1 / fps - dt_s)
+         loop_s = time.perf_counter() - loop_start
+         print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+         move_cursor_up(1)
+@@ -200,12 +191,7 @@
+     init_logging()
+     logging.info(pformat(asdict(cfg)))
+     if cfg.display_data:
+-        init_rerun(session_name="teleoperation", ip=cfg.display_ip, port=cfg.display_port)
+-    display_compressed_images = (
+-        True
+-        if (cfg.display_data and cfg.display_ip is not None and cfg.display_port is not None)
+-        else cfg.display_compressed_images
+-    )
++        init_rerun(session_name="teleoperation")
+ 
+     teleop = make_teleoperator_from_config(cfg.teleop)
+     robot = make_robot_from_config(cfg.robot)
+@@ -224,7 +210,6 @@
+             teleop_action_processor=teleop_action_processor,
+             robot_action_processor=robot_action_processor,
+             robot_observation_processor=robot_observation_processor,
+-            display_compressed_images=display_compressed_images,
+         )
+     except KeyboardInterrupt:
+         pass
+--- a/scripts/lerobot_eval.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_eval.py	2026-04-15 22:36:03
+@@ -60,6 +60,7 @@
+ from pathlib import Path
+ from pprint import pformat
+ from typing import Any, TypedDict
++import sys
+ 
+ import einops
+ import gymnasium as gym
+@@ -69,6 +70,30 @@
+ from torch import Tensor, nn
+ from tqdm import trange
+ 
++_repo_root = Path(__file__).resolve().parents[4]
++_gym_hil_path = _repo_root / "gym-hil"
++if _gym_hil_path.exists():
++    sys.path.insert(0, str(_gym_hil_path))
++
++import gym_hil
++
++# Hack: alias gym_hil as gym_gym_manipulator to satisfy LeRobot's factory
++sys.modules['gym_gym_manipulator'] = gym_hil
++
++# Register the environment with the ID that LeRobot expects (package_name/task)
++# This prevents NameNotFound error when LeRobot constructs the gym_id
++gym.register(
++    id="gym_gym_manipulator/SO100PickCubeBase-v0",
++    entry_point="gym_hil.envs:SO100PickCubeGymEnv",
++    max_episode_steps=200,
++)
++
++gym.register(
++    id="gym_gym_manipulator/SO100GrabPenBase-v0",
++    entry_point="gym_hil.envs:SO100GrabPenGymEnv",
++    max_episode_steps=2000,
++)
++
+ from lerobot.configs import parser
+ from lerobot.configs.eval import EvalPipelineConfig
+ from lerobot.envs.factory import make_env, make_env_pre_post_processors
+@@ -177,9 +202,9 @@
+             action = policy.select_action(observation)
+         action = postprocessor(action)
+ 
+-        action_transition = {ACTION: action}
++        action_transition = {"action": action}
+         action_transition = env_postprocessor(action_transition)
+-        action = action_transition[ACTION]
++        action = action_transition["action"]
+ 
+         # Convert to CPU / numpy.
+         action_numpy: np.ndarray = action.to("cpu").numpy()
+--- a/scripts/lerobot_replay.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_replay.py	2026-04-15 22:36:03
+@@ -29,7 +29,7 @@
+ Example replay with bimanual so100:
+ ```shell
+ lerobot-replay \
+-  --robot.type=bi_so_follower \
++  --robot.type=bi_so100_follower \
+   --robot.left_arm_port=/dev/tty.usbmodem5A460851411 \
+   --robot.right_arm_port=/dev/tty.usbmodem5A460812391 \
+   --robot.id=bimanual_follower \
+@@ -53,15 +53,14 @@
+ from lerobot.robots import (  # noqa: F401
+     Robot,
+     RobotConfig,
+-    bi_so_follower,
++    bi_so100_follower,
+     earthrover_mini_plus,
+     hope_jr,
+     koch_follower,
+     make_robot_from_config,
+     omx_follower,
+-    reachy2,
+-    so_follower,
+-    unitree_g1,
++    so100_follower,
++    so101_follower,
+ )
+ from lerobot.utils.constants import ACTION
+ from lerobot.utils.import_utils import register_third_party_plugins
+@@ -124,7 +123,7 @@
+         _ = robot.send_action(processed_action)
+ 
+         dt_s = time.perf_counter() - start_episode_t
+-        precise_sleep(max(1 / dataset.fps - dt_s, 0.0))
++        precise_sleep(1 / dataset.fps - dt_s)
+ 
+     robot.disconnect()
+ 
+--- a/scripts/lerobot_calibrate.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_calibrate.py	2026-04-15 22:36:03
+@@ -36,23 +36,23 @@
+ from lerobot.robots import (  # noqa: F401
+     Robot,
+     RobotConfig,
+-    bi_so_follower,
+     hope_jr,
+     koch_follower,
+     lekiwi,
+     make_robot_from_config,
+     omx_follower,
+-    so_follower,
++    so100_follower,
++    so101_follower,
+ )
+ from lerobot.teleoperators import (  # noqa: F401
+     Teleoperator,
+     TeleoperatorConfig,
+-    bi_so_leader,
+     homunculus,
+     koch_leader,
+     make_teleoperator_from_config,
+     omx_leader,
+-    so_leader,
++    so100_leader,
++    so101_leader,
+ )
+ from lerobot.utils.import_utils import register_third_party_plugins
+ from lerobot.utils.utils import init_logging
+--- a/scripts/lerobot_find_joint_limits.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_find_joint_limits.py	2026-04-15 22:36:03
+@@ -44,20 +44,20 @@
+ from lerobot.model.kinematics import RobotKinematics
+ from lerobot.robots import (  # noqa: F401
+     RobotConfig,
+-    bi_so_follower,
+     koch_follower,
+     make_robot_from_config,
+     omx_follower,
+-    so_follower,
++    so100_follower,
++    so101_follower,
+ )
+ from lerobot.teleoperators import (  # noqa: F401
+     TeleoperatorConfig,
+-    bi_so_leader,
+     gamepad,
+     koch_leader,
+     make_teleoperator_from_config,
+     omx_leader,
+-    so_leader,
++    so100_leader,
++    so101_leader,
+ )
+ from lerobot.utils.robot_utils import precise_sleep
+ 
+--- a/scripts/lerobot_setup_motors.py	2026-04-16 22:37:05
++++ b/scripts/lerobot_setup_motors.py	2026-04-15 22:36:03
+@@ -30,20 +30,20 @@
+ 
+ from lerobot.robots import (  # noqa: F401
+     RobotConfig,
+-    bi_so_follower,
+     koch_follower,
+     lekiwi,
+     make_robot_from_config,
+     omx_follower,
+-    so_follower,
++    so100_follower,
++    so101_follower,
+ )
+ from lerobot.teleoperators import (  # noqa: F401
+     TeleoperatorConfig,
+-    bi_so_leader,
+     koch_leader,
+     make_teleoperator_from_config,
+     omx_leader,
+-    so_leader,
++    so100_leader,
++    so101_leader,
+ )
+ 
+ COMPATIBLE_DEVICES = [
+--- a/policies/smolvla/modeling_smolvla.py	2026-04-16 22:37:05
++++ b/policies/smolvla/modeling_smolvla.py	2026-04-15 22:36:34
+@@ -480,28 +480,6 @@
+         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
+         return actions
+ 
+-    def _get_default_peft_targets(self) -> dict[str, any]:
+-        """Return default PEFT target modules for SmolVLA fine-tuning."""
+-        common_projections = (
+-            "state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out"
+-        )
+-        target_modules = rf"(model\.vlm_with_expert\.lm_expert\..*\.(q|v)_proj|model\.({common_projections}))"
+-        return {
+-            "target_modules": target_modules,
+-            "modules_to_save": [],
+-        }
+-
+-    def _validate_peft_config(self, peft_config) -> None:
+-        """Validate PEFT configuration for SmolVLA."""
+-        super()._validate_peft_config(peft_config)
+-        if not self.config.load_vlm_weights:
+-            import logging
+-
+-            logging.warning(
+-                "Training SmolVLA from scratch using PEFT. This is unlikely to yield good results. "
+-                "Set `load_vlm_weights=True` to fine-tune the existing policy."
+-            )
+-
+ 
+ def pad_tensor(tensor, max_len, pad_value=0):
+     """
+--- a/robots/utils.py	2026-04-16 22:37:05
++++ b/robots/utils.py	2026-04-15 22:36:03
+@@ -33,11 +33,11 @@
+ 
+         return OmxFollower(config)
+     elif config.type == "so100_follower":
+-        from .so_follower import SO100Follower
++        from .so100_follower import SO100Follower
+ 
+         return SO100Follower(config)
+     elif config.type == "so101_follower":
+-        from .so_follower import SO101Follower
++        from .so101_follower import SO101Follower
+ 
+         return SO101Follower(config)
+     elif config.type == "lekiwi":
+@@ -52,10 +52,10 @@
+         from .hope_jr import HopeJrArm
+ 
+         return HopeJrArm(config)
+-    elif config.type == "bi_so_follower":
+-        from .bi_so_follower import BiSOFollower
++    elif config.type == "bi_so100_follower":
++        from .bi_so100_follower import BiSO100Follower
+ 
+-        return BiSOFollower(config)
++        return BiSO100Follower(config)
+     elif config.type == "reachy2":
+         from .reachy2 import Reachy2Robot
+ 
+--- a/teleoperators/utils.py	2026-04-16 22:37:05
++++ b/teleoperators/utils.py	2026-04-15 22:36:03
+@@ -46,11 +46,11 @@
+ 
+         return OmxLeader(config)
+     elif config.type == "so100_leader":
+-        from .so_leader import SO100Leader
++        from .so100_leader import SO100Leader
+ 
+         return SO100Leader(config)
+     elif config.type == "so101_leader":
+-        from .so_leader import SO101Leader
++        from .so101_leader import SO101Leader
+ 
+         return SO101Leader(config)
+     elif config.type == "mock_teleop":
+@@ -73,10 +73,10 @@
+         from .homunculus import HomunculusArm
+ 
+         return HomunculusArm(config)
+-    elif config.type == "bi_so_leader":
+-        from .bi_so_leader import BiSOLeader
++    elif config.type == "bi_so100_leader":
++        from .bi_so100_leader import BiSO100Leader
+ 
+-        return BiSOLeader(config)
++        return BiSO100Leader(config)
+     elif config.type == "reachy2_teleoperator":
+         from .reachy2_teleoperator import Reachy2Teleoperator
+ 

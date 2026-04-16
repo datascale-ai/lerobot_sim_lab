@@ -1,0 +1,96 @@
+# 远程机械臂控制配置文件示例
+# 复制此文件为 config.yaml 并根据您的实际情况修改
+
+# 机械臂配置
+arm:
+  # 机械臂类型: dynamixel, feetech, ur, kinova, generic
+  type: "dynamixel"
+  
+  # 串口配置
+  serial:
+    # Windows: COM1, COM2, COM3, ...
+    # Linux: /dev/ttyUSB0, /dev/ttyUSB1, /dev/ttyACM0, ...
+    port: "COM3"
+    baudrate: 115200
+    timeout: 0.1
+  
+  # 关节配置
+  joints:
+    ids: [1, 2, 3, 4, 5, 6]  # 舵机/电机 ID
+    names: ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3"]
+    
+    # 关节限位 (弧度)
+    limits:
+      lower: [-3.14, -2.0, -2.5, -3.14, -2.0, -3.14]
+      upper: [3.14, 2.0, 2.5, 3.14, 2.0, 3.14]
+    
+    # 速度限制 (rad/s)
+    velocity_limit: [2.0, 2.0, 2.5, 3.0, 3.0, 3.0]
+
+# 网络配置
+network:
+  # 远程服务器配置
+  server:
+    host: "192.168.1.100"  # 远程服务器 IP
+    port: 9999              # Socket 端口
+    websocket_port: 8765    # WebSocket 端口
+  
+  # 通信协议: socket, websocket
+  protocol: "socket"
+  
+  # 控制频率 (Hz)
+  frequency: 100
+  
+  # 超时设置 (秒)
+  timeout: 5
+
+# MuJoCo 仿真配置
+simulation:
+  # 模型文件路径
+  model_path: "models/robot_arm.xml"
+  
+  # 仿真时间步长
+  timestep: 0.002
+  
+  # 可视化设置
+  viewer:
+    width: 1280
+    height: 720
+    camera: "fixed"
+
+# 数据记录配置
+recording:
+  enabled: true
+  output_dir: "recordings"
+  format: "hdf5"  # hdf5, zarr, json
+  
+  # 记录项
+  items:
+    - "qpos"
+    - "qvel"
+    - "action"
+    - "timestamp"
+
+# 日志配置
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "logs/arm_control.log"
+  console: true
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

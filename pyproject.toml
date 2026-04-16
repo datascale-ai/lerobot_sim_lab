@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lerobot-sim-lab"
+version = "0.1.0"
+description = "Research toolkit for embodied AI synthetic data generation with LeRobot and MuJoCo simulation"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Wang Cong" }]
+dependencies = [
+    "gymnasium>=0.29.1",
+    "h5py>=3.0.0",
+    "imageio[ffmpeg]>=2.34.0",
+    "matplotlib>=3.5.0",
+    "mediapy>=1.1.0",
+    "mujoco>=3.0.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.5.0",
+    "pandas>=1.5.0",
+    "torch>=2.0.0",
+    "tqdm>=4.60.0",
+]
+
+[project.optional-dependencies]
+lerobot = ["lerobot>=0.4.3"]
+training = ["accelerate", "torchaudio", "torchvision"]
+motion-planning = ["mplib"]
+hil = ["hidapi>=0.14.0", "pygame>=2.5.1", "pynput>=1.7.7"]
+remote = ["pyserial", "websockets"]
+jupyter = ["ipympl", "ipywidgets", "jupyterlab"]
+dev = ["mypy", "pre-commit", "pytest>=8.0", "pytest-cov", "pytest-subtests", "ruff"]
+all = [
+    "accelerate",
+    "hidapi>=0.14.0",
+    "ipympl",
+    "ipywidgets",
+    "jupyterlab",
+    "lerobot>=0.4.3",
+    "mplib",
+    "mypy",
+    "pre-commit",
+    "pygame>=2.5.1",
+    "pynput>=1.7.7",
+    "pyserial",
+    "pytest>=8.0",
+    "pytest-cov",
+    "pytest-subtests",
+    "ruff",
+    "torchaudio",
+    "torchvision",
+    "websockets",
+]
+
+[project.scripts]
+lerobot-sim-keyboard = "lerobot_sim_lab.control.keyboard:main"
+lerobot-sim-record = "lerobot_sim_lab.data.record_episodes:main"
+lerobot-sim-train = "lerobot_sim_lab.training.train_policy:main"
+lerobot-sim-view = "lerobot_sim_lab.sim.scene_viewer:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lerobot_sim_lab", "src/gym_hil"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/scripts",
+    "/tests",
+    "/docs",
+    "/assets",
+    "/patches",
+    "/docker",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["B", "C4", "E", "F", "I", "N", "SIM", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

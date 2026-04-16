@@ -1,0 +1,45 @@
+<?xml version="1.0" ?>
+<robot name="SO_5DOF_ARM100_8j_URDF.SLDASM">
+  <!-- 相邻链接（Adjacent） -->
+  <disable_collisions link1="Base" link2="Rotation_Pitch" reason="Adjacent"/>
+  <disable_collisions link1="Rotation_Pitch" link2="Upper_Arm" reason="Adjacent"/>
+  <disable_collisions link1="Upper_Arm" link2="Lower_Arm" reason="Adjacent"/>
+  <disable_collisions link1="Lower_Arm" link2="Wrist_Pitch_Roll" reason="Adjacent"/>
+  <disable_collisions link1="Wrist_Pitch_Roll" link2="Fixed_Jaw" reason="Adjacent"/>
+  <disable_collisions link1="Fixed_Jaw" link2="Moving Jaw" reason="Adjacent"/>
+  
+  <!-- Base与远端链接（在紧凑姿态下可能接近） -->
+  <disable_collisions link1="Base" link2="Upper_Arm" reason="Never"/>
+  <disable_collisions link1="Base" link2="Lower_Arm" reason="Never"/>
+  <disable_collisions link1="Base" link2="Wrist_Pitch_Roll" reason="Never"/>
+  <disable_collisions link1="Base" link2="Fixed_Jaw" reason="Never"/>
+  <disable_collisions link1="Base" link2="Moving Jaw" reason="Never"/>
+  
+  <!-- Rotation_Pitch与远端链接 -->
+  <disable_collisions link1="Rotation_Pitch" link2="Lower_Arm" reason="Never"/>
+  <disable_collisions link1="Rotation_Pitch" link2="Wrist_Pitch_Roll" reason="Never"/>
+  <disable_collisions link1="Rotation_Pitch" link2="Fixed_Jaw" reason="Never"/>
+  <disable_collisions link1="Rotation_Pitch" link2="Moving Jaw" reason="Never"/>
+  
+  <!-- Upper_Arm与远端链接 -->
+  <disable_collisions link1="Upper_Arm" link2="Wrist_Pitch_Roll" reason="Never"/>
+  <disable_collisions link1="Upper_Arm" link2="Fixed_Jaw" reason="Never"/>
+  <disable_collisions link1="Upper_Arm" link2="Moving Jaw" reason="Never"/>
+  
+  <!-- Lower_Arm与末端执行器 -->
+  <disable_collisions link1="Lower_Arm" link2="Fixed_Jaw" reason="Never"/>
+  <disable_collisions link1="Lower_Arm" link2="Moving Jaw" reason="Never"/>
+  
+  <!-- 夹爪与Wrist（已经是相邻，但额外保证） -->
+  <disable_collisions link1="Wrist_Pitch_Roll" link2="Moving Jaw" reason="Never"/>
+</robot>
+
+
+
+
+
+
+
+
+
+

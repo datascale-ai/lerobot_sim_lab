@@ -1,0 +1,25 @@
+{
+  "env": {
+    "name": "gym_hil",
+    "task": "SO100PickCubeScripted-v0",
+    "fps": 30,
+    "processor": {
+      "control_mode": "scripted",
+      "gripper": {
+        "use_gripper": true,
+        "gripper_penalty": 0.0
+      }
+    }
+  },
+  "dataset": {
+    "repo_id": "so100_pick_scripted",
+    "root": "./data",
+    "task": "pick_cube",
+    "num_episodes_to_record": 10,
+    "replay_episode": null,
+    "push_to_hub": false
+  },
+  "mode": "record",
+  "device": "cpu"
+}
+

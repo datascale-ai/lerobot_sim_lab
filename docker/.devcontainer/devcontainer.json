@@ -1,0 +1,16 @@
+{
+    "name": "Mujoco Lab",
+    "dockerComposeFile": "../docker-compose.yml",
+    "service": "mujoco-jupyter",
+    "workspaceFolder": "/app",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-toolsai.jupyter"
+            ]
+        }
+    },
+    "remoteUser": "root"
+}
