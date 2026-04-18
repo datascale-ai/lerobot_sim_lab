@@ -5,7 +5,7 @@ The repository is organized around a single installable package, `lerobot_sim_la
 - `config`: shared constants and scenario definitions
 - `envs`: MuJoCo gym environments, wrappers, and controllers
 - `data`: recording and dataset visualization
-- `control`: keyboard, interactive, and remote control tools
+- `control`: `arm_control` CLI (keyboard / TCP remote / real-robot send), interactive tools, and packaged remote helpers
 - `trajectory`: planning, playback, and analysis
 - `sim`: direct simulation and scene inspection helpers
 - `training`: policy training entry points

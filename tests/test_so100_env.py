@@ -37,11 +37,6 @@ class TestEnvCreation:
         assert env is not None
         env.close()
 
-    def test_legacy_gym_hil_id(self):
-        env = gym.make("gym_hil/SO100PickCubeScripted-v0")
-        assert env is not None
-        env.close()
-
 
 class TestEnvReset:
     def test_reset_returns_obs_and_info(self, scripted_env):

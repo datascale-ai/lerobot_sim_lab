@@ -22,18 +22,6 @@ def register_envs() -> None:
         "lerobot_sim_lab/SO100GrabPen-v0",
         "lerobot_sim_lab.envs.so100_gym_env:SO100GrabPenGymEnv",
     )
-    _register_once(
-        "gym_hil/SO100PickCubeBase-v0",
-        "lerobot_sim_lab.envs.so100_gym_env:SO100PickCubeGymEnv",
-    )
-    _register_once(
-        "gym_hil/SO100PickCubeScripted-v0",
-        "lerobot_sim_lab.envs.so100_scripted_env:SO100PickCubeScriptedEnv",
-    )
-    _register_once(
-        "gym_hil/SO100GrabPenBase-v0",
-        "lerobot_sim_lab.envs.so100_gym_env:SO100GrabPenGymEnv",
-    )
 
 
 __all__ = ["register_envs"]

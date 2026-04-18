@@ -7,11 +7,17 @@ dist/
 build/
 .venv/
 venv/
+q_venv/
+MUJOCO_LOG.TXT
 .vscode/
 .idea/
 .DS_Store
 outputs/
-data/
+eval_videos/
+/data/
+# Optional local checkpoints / weights (see scripts/*.sh); keep empty tree via .gitkeep
+third_party/*
+!third_party/.gitkeep
 *.hdf5
 *.mp4
 *.gif

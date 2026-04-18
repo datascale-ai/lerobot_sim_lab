@@ -1,6 +1,13 @@
 #!/bin/bash
+# 回放 LeRobot 数据集中的 episode。默认路径相对于本仓库根目录（由脚本位置自动解析）。
+# 可选环境变量: GPU_ID, LEROBOT_SIM_LAB_REPO_ROOT（覆盖仓库根）
 
-GPU_ID=5
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export LEROBOT_SIM_LAB_REPO_ROOT="${LEROBOT_SIM_LAB_REPO_ROOT:-${REPO_ROOT}}"
+
+GPU_ID="${GPU_ID:-0}"
 export MUJOCO_GL=glfw
 export HF_HUB_OFFLINE=0
 export TRANSFORMERS_OFFLINE=0
@@ -15,19 +22,16 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 
-repo_root = Path("/workspace")
-sys.path.insert(0, str(repo_root / "gym-hil"))
-sys.path.insert(0, str(repo_root))
+repo_root = Path(os.environ["LEROBOT_SIM_LAB_REPO_ROOT"])
 
-import gym_hil
-from pen_scenarios_config import PEN_SCENARIOS
-
-sys.modules["gym_gym_manipulator"] = gym_hil
+import lerobot_sim_lab.envs
+lerobot_sim_lab.envs.register_envs()
+from lerobot_sim_lab.config.scenarios.pen_grab import PEN_SCENARIOS
 
 if "gym_gym_manipulator/SO100PickCubeBase-v0" not in gym.registry:
     gym.register(
         id="gym_gym_manipulator/SO100PickCubeBase-v0",
-        entry_point="gym_hil.envs:SO100PickCubeGymEnv",
+        entry_point="lerobot_sim_lab.envs.so100_gym_env:SO100PickCubeGymEnv",
         max_episode_steps=400,
         kwargs={"control_dt": 1 / 30},
     )
@@ -35,12 +39,12 @@ if "gym_gym_manipulator/SO100PickCubeBase-v0" not in gym.registry:
 if "gym_gym_manipulator/SO100GrabPenBase-v0" not in gym.registry:
     gym.register(
         id="gym_gym_manipulator/SO100GrabPenBase-v0",
-        entry_point="gym_hil.envs:SO100GrabPenGymEnv",
+        entry_point="lerobot_sim_lab.envs.so100_gym_env:SO100GrabPenGymEnv",
         max_episode_steps=2000,
         kwargs={"control_dt": 1 / 30},
     )
 
-from gym_hil.wrappers.viewer_wrapper import PassiveViewerWrapper
+from lerobot_sim_lab.envs.wrappers.viewer_wrapper import PassiveViewerWrapper
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION
 

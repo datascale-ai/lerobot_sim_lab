@@ -15,6 +15,8 @@ bash patches/apply_patches.sh --dry-run
 bash patches/apply_patches.sh
 ```
 
+脚本结束时会打印两条验证命令：一条检查 **site-packages 内已打补丁的 `gym_hil` 与 `lerobot`**，另一条检查 **本仓库的 `lerobot_sim_lab` 可编辑安装**。二者含义不同，请勿混淆。
+
 | 文件 | 大小 | 说明 |
 |------|------|------|
 | [`patches/gym-hil-v0.1.13-so100.patch`](../patches/gym-hil-v0.1.13-so100.patch) | ~1100 行 | gym-hil SO-100 环境支持 |
@@ -28,7 +30,7 @@ bash patches/apply_patches.sh
 - **上游版本**: v0.1.13（与 fork 版本号一致）
 - **上游仓库**: https://github.com/huggingface/gym-hil
 - **对比基准**: 上游 `main` 分支 HEAD (commit `6ec0078`)
-- **处理方式**: 核心代码搬入 `src/lerobot_sim_lab/envs/`，`src/gym_hil/` 保留为纯转发兼容层
+- **处理方式**: 核心代码搬入 `src/lerobot_sim_lab/envs/`
 
 ### 1.1 新增文件（上游不存在）
 
@@ -41,24 +43,21 @@ bash patches/apply_patches.sh
 
 #### `__init__.py` — 新增 SO-100 环境注册
 
-在原有 Panda 环境注册之后追加了 6 个 SO-100 环境 ID 注册：
+在原有 Panda 环境注册之后追加了 SO-100 环境 ID 注册（现已统一使用 `lerobot_sim_lab/*` 命名空间）：
 
 ```python
 # 新增内容（60行）
-register(id="gym_hil/SO100PickCubeBase-v0", ...)
-register(id="gym_hil/SO100GrabPenBase-v0", ...)
-register(id="gym_hil/SO100PickCubeViewer-v0", ...)     # + PassiveViewerWrapper
-register(id="gym_hil/SO100PickCubeGamepad-v0", ...)     # + 手柄控制
-register(id="gym_hil/SO100PickCubeKeyboard-v0", ...)    # + 键盘控制
-register(id="gym_hil/SO100PickCubeScripted-v0", ...)    # 无窗口脚本化
+register(id="lerobot_sim_lab/SO100PickCube-v0", ...)
+register(id="lerobot_sim_lab/SO100GrabPen-v0", ...)
+register(id="lerobot_sim_lab/SO100PickCubeScripted-v0", ...)
 ```
 
 #### `envs/__init__.py` — 导出 SO-100 类
 
 ```python
-# 新增
-from gym_hil.envs.so100_gym_env import SO100PickCubeGymEnv, SO100GrabPenGymEnv
-from gym_hil.envs.so100_pick_scripted_env import SO100PickCubeScriptedEnv
+# 新增（现位于 lerobot_sim_lab.envs）
+from lerobot_sim_lab.envs.so100_gym_env import SO100PickCubeGymEnv, SO100GrabPenGymEnv
+from lerobot_sim_lab.envs.so100_scripted_env import SO100PickCubeScriptedEnv
 # __all__ 新增 3 个类
 ```
 
@@ -92,7 +91,7 @@ if hasattr(env, "unwrapped"):
 - **上游版本**: v0.4.3（tag `v0.4.3`）
 - **上游仓库**: https://github.com/huggingface/lerobot
 - **对比基准**: Git tag `v0.4.3`
-- **处理方式**: 重构后删除内嵌源码，改为 pip 依赖 `lerobot>=0.4.3`
+- **处理方式**: 重构后删除内嵌源码，改为 pip 依赖 `lerobot==0.4.3`（与补丁一致）
 
 > **注意**: 本地 fork 基于 v0.4.3 之前某个开发版本（缺少 `RobotObservation` 类、缺少 `pi0_fast` 策略等），
 > 部分 diff 是上游在 v0.4.3 发布前的变更，而非本地修改。以下仅记录**确认为本地自定义修改**的内容。
@@ -158,7 +157,7 @@ if hasattr(env, "unwrapped"):
 
 ### 2.3 当前项目的影响
 
-重构后 `lerobot_sim_lab` 不再内嵌 lerobot 源码，改用 pip 安装的 `lerobot>=0.4.3`。这意味着：
+重构后 `lerobot_sim_lab` 不再内嵌 lerobot 源码，改用 pip 安装的 `lerobot==0.4.3`。这意味着：
 
 1. **`envs/utils.py` 的 `state` 键支持** — 该 HACK 在 pip 版本中不存在。当前 `lerobot_sim_lab` 的环境使用
    `observation["state"]` 键，如果需要与 `lerobot-eval` 对接，可能需要在环境侧将 `state` 映射为 `agent_pos`。

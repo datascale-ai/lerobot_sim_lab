@@ -5,7 +5,7 @@ from PIL import Image
 
 
 def test_camera_positions():
-    env = gym.make("gym_hil/SO100PickCubeBase-v0", image_obs=True, render_mode="rgb_array")
+    env = gym.make("lerobot_sim_lab/SO100PickCube-v0", image_obs=True, render_mode="rgb_array")
     obs, _ = env.reset(seed=42)
     model = env.unwrapped._model
     renderer = mujoco.Renderer(model, height=480, width=640)

@@ -1,6 +1,6 @@
 {
   "env": {
-    "name": "gym_hil",
+    "name": "lerobot_sim_lab",
     "task": "SO100PickCubeScripted-v0",
     "fps": 30,
     "processor": {

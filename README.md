@@ -10,13 +10,15 @@
 ## 功能特性
 
 - **Gymnasium 仿真环境** — SO-100 抓取方块、抓笔、脚本化任务等环境，完整支持 Gymnasium API
-- **数据管道** — Episode 录制、HDF5 存储、LeRobot 数据集格式转换，支持多相机视角
+- **数据管道** — Episode 录制、HDF5 存储、LeRobot 数据集格式转换，支持多相机视角  
+- **交互式调优** — 场景、控制、抓笔等交互式调优工具，先把环境与控制调到合适状态再批量录制，提升数据质量
 - **多种控制方式** — 键盘、手柄、交互式 GUI、远程遥操作（TCP/WebSocket）
 - **轨迹规划** — 基于 OMPL 的多样化轨迹生成（通过 MPLib），支持种子复现
-- **策略训练** — 集成 LeRobot，支持 Diffusion Policy、ACT、TDMPC、VQBet 四种策略
-- **策略评估** — 随机/预训练策略评估、仿真与真实对比、SmoLVLA 模型评估
+- **策略训练**（两条路径，按需选用）  
+  - **`lerobot-sim-train`** — 本仓库提供的轻量入口，直接调用 LeRobot 内置策略配置：**Diffusion Policy**、**ACT**、**TDMPC**、**VQBet**（与上游 `lerobot.policies.*` 对应，实现见 [`training/train_policy.py`](src/lerobot_sim_lab/training/train_policy.py)）  
+  - **官方 `lerobot_train.py` 管线** — 与 Hugging Face 生态中更常见的 **SmolVLA**、**Pi0** 等大模型策略一起使用；需安装并打补丁后，参考 [`scripts/train_smolvla.sh`](scripts/train_smolvla.sh)、[`scripts/train_pi.sh`](scripts/train_pi.sh) 等示例脚本
+- **策略评估** — 随机/预训练策略评估、仿真与真实对比、SmolVLA 等模型评估（见 `evaluation/`）
 - **人机协作（HIL）** — 支持在 RL 训练过程中人类干预的环境 Wrapper（键盘/手柄控制器）
-- **交互式调优** — 场景参数、控制参数、抓笔任务等专用调优工具
 - **Docker 支持** — 容器化开发环境，可选国内镜像加速
 
 ## 快速开始
@@ -38,8 +40,8 @@ pip install -e .
 # 查看 MuJoCo 场景
 lerobot-sim-view
 
-# 键盘控制机器人
-lerobot-sim-keyboard
+# 控制仿真 SO-100（默认键盘；可用 --mode remote / send）
+lerobot-sim-control --scenario 0
 ```
 
 ### 第 2 步：安装训练/评估依赖（可选）
@@ -97,6 +99,46 @@ pip install -e ".[all]"
 
 详细安装说明参见 [docs/quickstart.md](docs/quickstart.md) 和 [docker/README.md](docker/README.md)。
 
+## 数据采集
+
+导出 **LeRobot** 数据集前，请先完成 **`pip install -e ".[lerobot]"`** 以及对 **lerobot 0.4.3** 的补丁步骤（见上文）。录制时会用到 MuJoCo 的离屏渲染；若在纯 SSH、没有显示器的环境运行，请提前配置好 OpenGL（例如设置 **`MUJOCO_GL`**）或使用虚拟显示，以免渲染初始化失败。
+
+### 抓取方块（一键脚本录制）
+
+抓方块是最省事的路径：装好依赖后，直接运行 **`lerobot-sim-record`**（默认 **`scripted`**）。程序会驱动脚本化的抓方块环境，按场景轮换自动跑 episode，并把图像与状态写进 LeRobot 数据集。
+
+```bash
+lerobot-sim-record --help
+lerobot-sim-record
+# 可按需调整：--num-episodes、--repo-id、--root、--fps、--task 等
+```
+
+各字段含义与实现细节见 [`src/lerobot_sim_lab/data/record_episodes.py`](src/lerobot_sim_lab/data/record_episodes.py)。
+
+### 抓笔（调轨迹，再导出数据集）
+
+抓笔任务更依赖「先调好场景与轨迹，再批量生成数据」。推荐顺序是：在 **`tuning`** 里把关键帧和回放跑通 → 用 **`trajectory`** 生成或整理关节轨迹 → 最后用 **`lerobot-sim-record --mode trajectory`** 把轨迹批量转成 LeRobot 格式。这样你可以反复改笔位、场景，再统一导出，而不必和抓方块共用同一套脚本入口。
+
+1. **现场调参、看回放**  
+   使用 **`python -m lerobot_sim_lab.tuning.tune_pen_grab`**（单场景）或 **`...tune_pen_grab_multi --scenario <编号>`**（多场景）。常用子命令是 **`live`**（看仿真）、**`control`**（存关键帧）、**`playback`**（回放插值轨迹）。若在 **`playback`** 时加上 **`--record`**，会额外存一段 **MP4** 视频，方便肉眼看效果；它**不是** LeRobot 数据集，只是辅助检查。
+
+2. **轨迹文件放哪**  
+   默认在仓库根下的 **`pen_grab_tuning/scenario_<编号>/`**：里面有 **`trajectories/episode_XXX.npz`**、**`seed.txt`** 等。需要批量规划时，可看 **`trajectory/`** 里的工具（例如 [`trajectory/generator.py`](src/lerobot_sim_lab/trajectory/generator.py)）。各命令的详细说明写在对应源码文件开头的注释里（如 [`tuning/tune_pen_grab.py`](src/lerobot_sim_lab/tuning/tune_pen_grab.py)）。
+
+3. **转成 LeRobot 数据集**  
+   轨迹准备好以后，用 **`trajectory`** 模式一次性写入数据集，例如：
+
+```bash
+lerobot-sim-record --mode trajectory \
+  --repo-id <你的数据集名或 repo_id> \
+  --root ./data \
+  --trajectory-root pen_grab_tuning \
+  --scenarios "1,2,3,4,5" \
+  --seed-file seed.txt
+```
+
+训练、评估时仍可使用 Gym 环境 **`lerobot_sim_lab/SO100GrabPen-v0`**；若要做**抓笔的仿真 LeRobot 数据**，请按上面步骤用 **`trajectory` 模式**导出。
+
 ## 补丁说明
 
 本项目依赖两个第三方库的 fork 修改版本。重构后不再内嵌完整的第三方源码，改为通过补丁文件管理差异：
@@ -121,6 +163,13 @@ bash patches/apply_patches.sh --dry-run
 bash patches/apply_patches.sh
 ```
 
+应用完成后建议自检：
+
+- **补丁目标包**（`site-packages` 内的官方 `gym_hil` / `lerobot`，与仓库内 `src/lerobot_sim_lab` 无关）：`python -c "import gym_hil, lerobot; print('patches OK')"`
+- **本仓库包**：`python -c "import lerobot_sim_lab; lerobot_sim_lab.envs.register_envs(); print('lerobot_sim_lab OK')"`
+
+`scripts/` 下的示例 shell 默认以**本仓库根目录**为基准（脚本内自动 `cd` 到仓库根）：数据集多在 `data_grab_pen/`、预训练权重可放在 `third_party/`（该目录已加入 `.gitignore`，需自行下载或软链）。训练脚本默认通过已安装的 `lerobot` 包解析 `lerobot_train.py` 路径；若你使用本地 LeRobot 源码树，可设置环境变量 `LEROBOT_TRAIN` 或 `LEROOT` 覆盖，详见各脚本文件头注释。
+
 完整的修改清单和技术细节参见 [docs/lerobot_patches.md](docs/lerobot_patches.md)。
 
 ## 命令行工具
@@ -129,9 +178,9 @@ bash patches/apply_patches.sh
 
 | 命令 | 功能 |
 |------|------|
-| `lerobot-sim-keyboard` | 键盘控制机器人关节 |
-| `lerobot-sim-record` | 录制仿真 Episode 并转换为 LeRobot 格式 |
-| `lerobot-sim-train` | 策略训练（Diffusion、ACT、TDMPC、VQBet） |
+| `lerobot-sim-control` | SO-100 仿真臂：键盘、`--mode remote` 网络遥操作、`--mode send` 同步真机 |
+| `lerobot-sim-record` | 抓方块：默认一键录制；抓笔：用 **`--mode trajectory`** 把 `pen_grab_tuning/` 里的轨迹转成数据集，详见 [数据采集](#数据采集) |
+| `lerobot-sim-train` | 轻量训练：LeRobot 内置 Diffusion / ACT / TDMPC / VQBet（SmolVLA、Pi0 等见 `scripts/` + 官方训练脚本） |
 | `lerobot-sim-view` | MuJoCo 场景可视化 |
 
 ## 项目结构
@@ -145,7 +194,7 @@ src/
       controllers/           操作空间（末端执行器）控制器
       wrappers/              动作映射、夹爪惩罚、可视化、人机协作 Wrapper
     data/                    Episode 录制与数据集转换
-    control/                 键盘控制、交互控制、关节探索
+    control/                 arm_control CLI（键盘/远程/真机）、交互控制、关节探索
       remote/                TCP/WebSocket 远程遥操作
     training/                策略训练（LeRobot 集成）
     evaluation/              策略评估与仿真-真实对比
@@ -153,13 +202,13 @@ src/
     sim/                     MuJoCo 仿真器封装、场景查看、相机调试
     tuning/                  任务专用参数调优
     utils/                   路径管理、渲染、格式化工具
-  gym_hil/                   gym-hil 向后兼容层
 patches/                     第三方库 SO-100 适配补丁
 assets/
   robots/so100/              SO-100 MuJoCo XML、URDF、SRDF、STL 网格
   robots/so101/              SO-101 机器人模型文件
   configs/                   录制配置、远程控制配置
 scripts/                     可运行的 Demo 与 Shell 脚本
+third_party/                 本地预训练权重等（仅 .gitkeep 入库，其余见 .gitignore）
 tests/                       Pytest 测试套件
 docs/                        项目文档
 docker/                      Docker 构建与 DevContainer 文件
@@ -173,8 +222,6 @@ examples/notebooks/          Jupyter Notebook 示例
 | `lerobot_sim_lab/SO100PickCube-v0` | SO-100 方块抓取与放置 |
 | `lerobot_sim_lab/SO100PickCubeScripted-v0` | SO-100 脚本化抓取与放置 |
 | `lerobot_sim_lab/SO100GrabPen-v0` | SO-100 抓笔任务 |
-
-为向后兼容，同时注册了 `gym_hil/*` 格式的环境 ID。
 
 ```python
 import gymnasium as gym
