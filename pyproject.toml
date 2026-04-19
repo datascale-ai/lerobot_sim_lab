@@ -25,7 +25,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-lerobot = ["lerobot>=0.4.3"]
+# Must match patches/lerobot-v0.4.3-so100.patch (pip resolves >=0.4.3 to 0.5.x otherwise).
+lerobot = ["lerobot==0.4.3"]
 training = ["accelerate", "torchaudio", "torchvision"]
 motion-planning = ["mplib"]
 hil = ["hidapi>=0.14.0", "pygame>=2.5.1", "pynput>=1.7.7"]
@@ -38,7 +39,7 @@ all = [
     "ipympl",
     "ipywidgets",
     "jupyterlab",
-    "lerobot>=0.4.3",
+    "lerobot==0.4.3",
     "mplib",
     "mypy",
     "pre-commit",
@@ -55,13 +56,13 @@ all = [
 ]
 
 [project.scripts]
-lerobot-sim-keyboard = "lerobot_sim_lab.control.keyboard:main"
+lerobot-sim-control = "lerobot_sim_lab.control.arm_control:main"
 lerobot-sim-record = "lerobot_sim_lab.data.record_episodes:main"
 lerobot-sim-train = "lerobot_sim_lab.training.train_policy:main"
 lerobot-sim-view = "lerobot_sim_lab.sim.scene_viewer:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/lerobot_sim_lab", "src/gym_hil"]
+packages = ["src/lerobot_sim_lab"]
 
 [tool.hatch.build.targets.sdist]
 include = [

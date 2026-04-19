@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-MuJoCo SO100 Robot Arm Keyboard Control Script
-Can be run in VNC window, use keyboard to control robot arm joints
+MuJoCo SO-100 arm control CLI (installed as ``lerobot-sim-control``).
+
+Supports ``--mode keyboard`` (MuJoCo viewer + keys), ``--mode remote`` (TCP
+joint deltas from a client), and ``--mode send`` (stream to a real SO-100 via
+LeRobot, optional LeRobot-format recording).
 """
 
 import argparse
@@ -400,8 +403,18 @@ def send_real_robot_stream(
             robot.disconnect()
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="MuJoCo SO100 Robot Arm Control")
+def main():
+    parser = argparse.ArgumentParser(
+        description="MuJoCo SO-100 arm control (keyboard, TCP remote, or send to real robot).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  lerobot-sim-control --scenario 0
+  lerobot-sim-control --scenario 0 --mode remote --listen-port 5555
+  lerobot-sim-control --scenario 0 --mode send --robot-port /dev/ttyUSB0 \\
+      --server-host 127.0.0.1 --server-port 5555
+""".strip(),
+    )
     parser.add_argument('--scenario', type=int, required=True, choices=[0,1,2,3,4,5])
     parser.add_argument('--mode', type=str, default='keyboard', choices=['keyboard', 'remote', 'send'])
     parser.add_argument('--listen-host', type=str, default='0.0.0.0')
@@ -435,3 +448,7 @@ if __name__ == "__main__":
             args.record_seconds,
             args.record_output or None,
         )
+
+
+if __name__ == "__main__":
+    main()

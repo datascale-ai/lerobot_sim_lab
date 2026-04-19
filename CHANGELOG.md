@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### 变更
+
+- 控制 CLI：`lerobot-sim-keyboard` 重命名为 `lerobot-sim-control`；实现模块 `control/keyboard.py` 重命名为 `control/arm_control.py`（`--mode keyboard` / `remote` / `send` 用法不变）
+- `pyproject.toml`：`[lerobot]` / `all` 固定 `lerobot==0.4.3`，与 `patches/lerobot-v0.4.3-so100.patch` 一致；`apply_patches.sh` 在打补丁前校验版本，避免对 0.5.x 部分应用失败
+
+### 文档与脚本
+
+- `patches/apply_patches.sh`：补充补丁应用后的分层验证说明；未安装 `lerobot` 时的安装提示改为与补丁版本一致的 `lerobot==0.4.3`
+- `README.md`、`docs/quickstart.md`：补丁验证步骤与 `scripts/` 路径说明
+- `scripts/eval_smolvla.sh`：支持环境变量覆盖路径；改为 `python -m lerobot_sim_lab.evaluation.eval_smolvla`
+- `scripts/train_smolvla.sh`、`scripts/train_pi.sh`、`scripts/start_policy_server.sh`、`scripts/lerobot_replay.sh`：支持通过环境变量覆盖硬编码目录，并增加脚本头注释
+- 示例脚本默认值改为**相对本仓库根**（自动解析 `REPO_ROOT`），移除 `/workspace`；增加 `third_party/` 占位与 `.gitignore` 规则；Policy Server 改为直接 `python -m` 启动
+
 ## 0.1.0 (2026-04-16)
 
 首次开源发布。将原始 SO-100/SO-101 仿真工作区重构为可安装的 Python 包。
@@ -7,7 +22,6 @@
 ### 新增
 
 - `src/lerobot_sim_lab/` 主包，包含 config、envs、data、control、training、evaluation、trajectory、sim、tuning、utils 共 10 个子模块
-- `src/gym_hil/` 向后兼容转发层
 - Gymnasium 仿真环境：`SO100PickCube-v0`、`SO100PickCubeScripted-v0`、`SO100GrabPen-v0`
 - 4 个 CLI 入口：`lerobot-sim-keyboard`、`lerobot-sim-record`、`lerobot-sim-train`、`lerobot-sim-view`
 - `patches/` 目录：gym-hil 和 lerobot 的 SO-100 适配补丁及一键应用脚本

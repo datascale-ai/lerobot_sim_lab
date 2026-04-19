@@ -28,7 +28,7 @@ try:
 except ImportError:
     HAS_LEROBOT = False
 
-import gym_hil
+import lerobot_sim_lab.envs  # noqa: F401 — register envs
 
 # Import scenario library for random cube positions
 from lerobot_sim_lab.config.scenarios.pen_grab import PEN_SCENARIOS
@@ -44,19 +44,19 @@ def create_env(task="SO100PickCubeBase-v0", render=False, control_dt=1 / 30):
         control_dt: Control timestep in seconds (default 1/30 ≈ 0.0333 = 30Hz)
                    Must match the training data frequency!
     """
-    # Register environment
-    sys.modules["gym_gym_manipulator"] = gym_hil
+    lerobot_sim_lab.envs.register_envs()
+
     if "gym_gym_manipulator/SO100PickCubeBase-v0" not in gym.registry:
         gym.register(
             id="gym_gym_manipulator/SO100PickCubeBase-v0",
-            entry_point="gym_hil.envs:SO100PickCubeGymEnv",
+            entry_point="lerobot_sim_lab.envs.so100_gym_env:SO100PickCubeGymEnv",
             max_episode_steps=400,
             kwargs={"control_dt": control_dt},
         )
     if "gym_gym_manipulator/SO100GrabPenBase-v0" not in gym.registry:
         gym.register(
             id="gym_gym_manipulator/SO100GrabPenBase-v0",
-            entry_point="gym_hil.envs:SO100GrabPenGymEnv",
+            entry_point="lerobot_sim_lab.envs.so100_gym_env:SO100GrabPenGymEnv",
             max_episode_steps=4000,
             kwargs={"control_dt": control_dt},
         )
@@ -64,7 +64,7 @@ def create_env(task="SO100PickCubeBase-v0", render=False, control_dt=1 / 30):
     env = gym.make(f"gym_gym_manipulator/{task}")
 
     if render:
-        from gym_hil.wrappers.viewer_wrapper import PassiveViewerWrapper
+        from lerobot_sim_lab.envs.wrappers.viewer_wrapper import PassiveViewerWrapper
 
         # Keep sync_every_n_steps=1 for smooth visualization
         env = PassiveViewerWrapper(env, default_camera="camera_front_new", sync_every_n_steps=1)

@@ -57,6 +57,16 @@ if [ -d "$LEROBOT_DIR" ]; then
     echo "========== 应用 lerobot 补丁 =========="
     echo "目标: $LEROBOT_DIR"
 
+    LEROBOT_VER="$($PYTHON -c "import importlib.metadata as m; print(m.version('lerobot'))" 2>/dev/null || echo "unknown")"
+    if [[ "$LEROBOT_VER" != "0.4.3" ]]; then
+        echo ""
+        echo "[ERROR] 已安装的 lerobot 版本为 ${LEROBOT_VER}，但补丁仅支持 0.4.3。"
+        echo "  请先重装: pip uninstall -y lerobot && pip install 'lerobot==0.4.3'"
+        echo "  （若曾部分打补丁失败，请删除 site-packages/lerobot 下 *.rej 后再装）"
+        echo "  本仓库可选依赖已固定为 lerobot==0.4.3，请使用: pip install -e \".[lerobot]\""
+        exit 1
+    fi
+
     cd "$LEROBOT_DIR"
     if patch -p1 --forward $DRY_RUN < "$LEROBOT_PATCH"; then
         echo "[OK] lerobot 补丁应用成功"
@@ -66,9 +76,20 @@ if [ -d "$LEROBOT_DIR" ]; then
 else
     echo ""
     echo "[SKIP] lerobot 未安装（未找到 $LEROBOT_DIR）"
-    echo "  安装: pip install 'lerobot-sim-lab[lerobot]'"
+    echo "  安装: pip install 'lerobot==0.4.3'   # 与补丁版本一致（或按 README 安装可选依赖 [lerobot]）"
 fi
 
 echo ""
 echo "========== 完成 =========="
-echo "验证: python -c \"import gym_hil; import lerobot; print('OK')\""
+echo "验证（本机已激活安装 lerobot_sim_lab 的虚拟环境）："
+echo ""
+echo "  1) lerobot（补丁目标包，须在 site-packages）："
+echo "     $PYTHON -c \"import importlib.metadata as m; assert m.version('lerobot')=='0.4.3'; import lerobot; print('lerobot', m.version('lerobot'), 'OK')\""
+echo ""
+echo "  2) gym-hil（可选，仅在使用上游 gym_hil 管线时需要）："
+echo "     $PYTHON -c \"import gym_hil; print('gym_hil OK')\"   # 未安装则跳过或 pip install gym-hil==0.1.13"
+echo ""
+echo "  3) 本仓库可编辑安装："
+echo "     $PYTHON -c \"import lerobot_sim_lab; lerobot_sim_lab.envs.register_envs(); print('lerobot_sim_lab OK')\""
+echo ""
+echo "若 (3) 失败：在项目根执行 pip install -e ."

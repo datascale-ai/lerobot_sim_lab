@@ -1,17 +1,15 @@
 import gymnasium as gym
-import gym_hil
 import numpy as np
 import mujoco
 from PIL import Image
 import os
 
-# 导入录制脚本里的渲染函数
-from record_scripted_episodes import render_dual_view
+from lerobot_sim_lab.data.record_episodes import render_dual_view
 
 def test_views():
     # 创建环境
     # 注意：这里我们不需要 TimeLimit，直接用 raw env 以方便访问 model
-    env = gym.make("gym_hil/SO100PickCubeBase-v0", image_obs=True, render_mode="rgb_array")
+    env = gym.make("lerobot_sim_lab/SO100PickCube-v0", image_obs=True, render_mode="rgb_array")
     obs, _ = env.reset(seed=42)
     
     # 1. 使用动态相机渲染 (Ground Truth)
